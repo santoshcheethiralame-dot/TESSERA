@@ -47,6 +47,19 @@ impl<'a, M> Io<'a, M> {
     pub fn gen_bool(&mut self, p: f64) -> bool {
         self.rng.gen_bool(p)
     }
+
+    pub fn new(me: NodeId, now: Time, rng: &'a mut Rng) -> Self {
+        Io {
+            me,
+            now,
+            rng,
+            actions: Vec::new(),
+        }
+    }
+
+    pub fn into_actions(self) -> Vec<Action<M>> {
+        self.actions
+    }
 }
 
 pub trait Process {

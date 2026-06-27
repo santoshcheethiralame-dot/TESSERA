@@ -1,6 +1,14 @@
-use std::time::Instant;
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use consensus::{encode_put, KvStore, Message, Raft};
+use kv::LsmKv;
+use server::{run_node, Client};
 use sim::{millis, NodeId, Simulator};
 use storage::{Db, RealDisk};
 
@@ -9,6 +17,8 @@ fn main() {
     storage_bench();
     println!();
     distributed_bench();
+    println!();
+    networked_bench();
 }
 
 fn percentile(sorted: &[u128], p: f64) -> u128 {
@@ -184,4 +194,93 @@ fn distributed_bench() {
         "  {:<26} majority keeps a leader: {maj}, minority elects: {min} (no split-brain)",
         "3|2 partition"
     );
+}
+
+fn spawn_cluster(
+    base: u16,
+    ids: &[NodeId],
+    root: &Path,
+) -> (BTreeMap<NodeId, SocketAddr>, Vec<Arc<AtomicBool>>) {
+    let addrs: BTreeMap<NodeId, SocketAddr> = ids
+        .iter()
+        .map(|&i| (i, format!("127.0.0.1:{}", base + i as u16).parse().unwrap()))
+        .collect();
+    let mut shutdowns = Vec::new();
+    for &id in ids {
+        let addr = addrs[&id];
+        let peers: BTreeMap<NodeId, SocketAddr> = addrs
+            .iter()
+            .filter(|&(&k, _)| k != id)
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        let cluster = ids.to_vec();
+        let dir = root.join(format!("n{id}"));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        shutdowns.push(shutdown.clone());
+        thread::spawn(move || {
+            let db = Db::open(RealDisk::open(&dir).unwrap()).unwrap();
+            let raft = Raft::new(id, &cluster, LsmKv::new(db));
+            run_node(id, addr, peers, raft, shutdown);
+        });
+    }
+    (addrs, shutdowns)
+}
+
+fn networked_bench() {
+    println!("-- distributed Raft over REAL TCP (5 nodes, localhost, real timers + sockets) --");
+    let ids: Vec<NodeId> = vec![0, 1, 2, 3, 4];
+    let root = std::env::temp_dir().join("tessera-bench-net");
+    let _ = std::fs::remove_dir_all(&root);
+    let (addrs, shutdowns) = spawn_cluster(19400, &ids, &root);
+    let nodes: Vec<SocketAddr> = ids.iter().map(|&i| addrs[&i]).collect();
+
+    thread::sleep(Duration::from_millis(1500));
+    let mut client = Client::new(nodes, 2_000_001);
+    for i in 0..50 {
+        client.put(format!("warm{i}").as_bytes(), b"v");
+    }
+
+    let writes = 2_000usize;
+    let value = vec![b'x'; 100];
+    let mut lat = Vec::with_capacity(writes);
+    let wall = Instant::now();
+    for i in 0..writes {
+        let key = format!("k{i:06}");
+        let start = Instant::now();
+        client.put(key.as_bytes(), &value);
+        lat.push(start.elapsed().as_nanos());
+    }
+    let secs = wall.elapsed().as_secs_f64();
+    report("replicated put (TCP)", lat);
+    println!(
+        "  {:<26} {writes} writes in {secs:.2} s     ({:>10.0} writes/s, serial client)",
+        "replicated throughput",
+        writes as f64 / secs
+    );
+
+    let reads = 2_000usize;
+    let mut lat = Vec::with_capacity(reads);
+    for i in 0..reads {
+        let key = format!("k{:06}", i % writes);
+        let start = Instant::now();
+        let _ = client.get(key.as_bytes());
+        lat.push(start.elapsed().as_nanos());
+    }
+    report("linearizable get (TCP)", lat);
+
+    let killed = client.leader_hint();
+    shutdowns[killed].store(true, Ordering::Relaxed);
+    let start = Instant::now();
+    client.put(b"after-kill", b"v");
+    let recovery = start.elapsed().as_millis();
+    println!(
+        "  {:<26} {recovery} ms  (killed node {killed}; client re-routed and committed)",
+        "recovery after leader kill"
+    );
+
+    for shutdown in &shutdowns {
+        shutdown.store(true, Ordering::Relaxed);
+    }
+    thread::sleep(Duration::from_millis(300));
+    let _ = std::fs::remove_dir_all(&root);
 }

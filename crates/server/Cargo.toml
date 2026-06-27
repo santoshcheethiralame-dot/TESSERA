@@ -1,11 +1,14 @@
 [package]
-name = "bench"
+name = "server"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "tessera-server"
+path = "src/main.rs"
+
 [dependencies]
-storage = { path = "../storage" }
 consensus = { path = "../consensus" }
-sim = { path = "../sim" }
-server = { path = "../server" }
+storage = { path = "../storage" }
 kv = { path = "../kv" }
+sim = { path = "../sim" }

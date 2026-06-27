@@ -23,8 +23,8 @@ pub enum Role {
 
 #[derive(Clone)]
 pub struct Config {
-    old: Vec<NodeId>,
-    new: Option<Vec<NodeId>>,
+    pub(crate) old: Vec<NodeId>,
+    pub(crate) new: Option<Vec<NodeId>>,
 }
 
 impl Config {
