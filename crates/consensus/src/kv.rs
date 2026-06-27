@@ -7,6 +7,7 @@ pub trait StateMachine {
 pub enum KvCommand {
     Put(Vec<u8>, Vec<u8>),
     Delete(Vec<u8>),
+    Get(Vec<u8>),
 }
 
 #[derive(Default)]
@@ -29,13 +30,15 @@ impl StateMachine for KvStore {
         match decode_command(command) {
             Some(KvCommand::Put(key, value)) => {
                 self.map.insert(key, value);
+                Vec::new()
             }
             Some(KvCommand::Delete(key)) => {
                 self.map.remove(&key);
+                Vec::new()
             }
-            None => {}
+            Some(KvCommand::Get(key)) => encode_value(self.map.get(&key).map(|v| v.as_slice())),
+            None => Vec::new(),
         }
-        Vec::new()
     }
 }
 
@@ -52,6 +55,12 @@ pub fn encode_delete(key: &[u8]) -> Vec<u8> {
     buf
 }
 
+pub fn encode_get(key: &[u8]) -> Vec<u8> {
+    let mut buf = vec![2];
+    put_bytes(&mut buf, key);
+    buf
+}
+
 pub fn decode_command(bytes: &[u8]) -> Option<KvCommand> {
     let tag = *bytes.first()?;
     let mut pos = 1;
@@ -59,6 +68,25 @@ pub fn decode_command(bytes: &[u8]) -> Option<KvCommand> {
     match tag {
         1 => Some(KvCommand::Put(key, take(bytes, &mut pos)?)),
         0 => Some(KvCommand::Delete(key)),
+        2 => Some(KvCommand::Get(key)),
+        _ => None,
+    }
+}
+
+pub fn encode_value(value: Option<&[u8]>) -> Vec<u8> {
+    match value {
+        Some(v) => {
+            let mut buf = vec![1];
+            buf.extend_from_slice(v);
+            buf
+        }
+        None => vec![0],
+    }
+}
+
+pub fn decode_value(bytes: &[u8]) -> Option<Vec<u8>> {
+    match bytes.first() {
+        Some(1) => Some(bytes[1..].to_vec()),
         _ => None,
     }
 }

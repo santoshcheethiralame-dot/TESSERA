@@ -16,10 +16,11 @@ fn leader(sim: &Simulator<Raft<KvStore>>) -> usize {
         .expect("a leader should exist")
 }
 
-fn put(sim: &mut Simulator<Raft<KvStore>>, to: usize, key: &[u8], value: &[u8]) {
+fn put(sim: &mut Simulator<Raft<KvStore>>, to: usize, id: u64, key: &[u8], value: &[u8]) {
     sim.inject(
         to,
         Message::ClientRequest {
+            request_id: id,
             command: encode_put(key, value),
         },
     );
@@ -30,7 +31,7 @@ fn replicates_a_write_to_all_replicas() {
     let mut sim = cluster(5, 1);
     sim.run_for(secs(2));
     let l = leader(&sim);
-    put(&mut sim, l, b"k", b"v");
+    put(&mut sim, l, 1, b"k", b"v");
     sim.run_for(secs(2));
 
     for i in 0..sim.nodes() {
@@ -50,7 +51,7 @@ fn write_commits_with_one_follower_partitioned() {
 
     let ids: Vec<usize> = (0..5).collect();
     sim.partitions_mut().isolate(victim, &ids);
-    put(&mut sim, l, b"k", b"v");
+    put(&mut sim, l, 1, b"k", b"v");
     sim.run_for(secs(2));
 
     for i in (0..5).filter(|&i| i != victim) {
@@ -73,7 +74,7 @@ fn log_converges_after_leader_change() {
     let mut sim = cluster(5, 3);
     sim.run_for(secs(2));
     let l1 = leader(&sim);
-    put(&mut sim, l1, b"a", b"1");
+    put(&mut sim, l1, 1, b"a", b"1");
     sim.run_for(secs(2));
 
     let ids: Vec<usize> = (0..5).collect();
@@ -83,7 +84,7 @@ fn log_converges_after_leader_change() {
     let l2 = (0..5)
         .find(|&i| i != l1 && sim.process(i).is_leader())
         .unwrap();
-    put(&mut sim, l2, b"b", b"2");
+    put(&mut sim, l2, 2, b"b", b"2");
     sim.run_for(secs(2));
 
     for i in (0..5).filter(|&i| i != l1) {
@@ -105,7 +106,7 @@ fn many_writes_replicate_in_order() {
     let l = leader(&sim);
     for i in 0..50u32 {
         let key = format!("k{i:03}");
-        put(&mut sim, l, key.as_bytes(), b"v");
+        put(&mut sim, l, u64::from(i + 1), key.as_bytes(), b"v");
     }
     sim.run_for(secs(3));
 
@@ -125,12 +126,13 @@ fn replicates_a_delete() {
     let mut sim = cluster(3, 5);
     sim.run_for(secs(2));
     let l = leader(&sim);
-    put(&mut sim, l, b"k", b"v");
+    put(&mut sim, l, 1, b"k", b"v");
     sim.run_for(secs(1));
 
     sim.inject(
         l,
         Message::ClientRequest {
+            request_id: 2,
             command: encode_delete(b"k"),
         },
     );

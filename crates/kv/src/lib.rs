@@ -1,4 +1,4 @@
-use consensus::{decode_command, KvCommand, StateMachine};
+use consensus::{decode_command, encode_value, KvCommand, StateMachine};
 use storage::{Db, Disk};
 
 pub struct LsmKv<D: Disk> {
@@ -20,12 +20,14 @@ impl<D: Disk> StateMachine for LsmKv<D> {
         match decode_command(command) {
             Some(KvCommand::Put(key, value)) => {
                 let _ = self.db.put(&key, &value);
+                Vec::new()
             }
             Some(KvCommand::Delete(key)) => {
                 let _ = self.db.delete(&key);
+                Vec::new()
             }
-            None => {}
+            Some(KvCommand::Get(key)) => encode_value(self.db.get(&key).ok().flatten().as_deref()),
+            None => Vec::new(),
         }
-        Vec::new()
     }
 }

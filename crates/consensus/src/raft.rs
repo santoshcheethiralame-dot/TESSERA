@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sim::{millis, Io, NodeId, Process, TimerId};
 
 use crate::kv::StateMachine;
@@ -20,7 +22,15 @@ pub enum Role {
 #[derive(Clone)]
 pub struct LogEntry {
     pub term: Term,
+    pub client: NodeId,
+    pub request_id: u64,
     pub command: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub enum ClientResult {
+    Ok(Vec<u8>),
+    NotLeader(Option<NodeId>),
 }
 
 #[derive(Clone)]
@@ -49,7 +59,12 @@ pub enum Message {
         match_index: usize,
     },
     ClientRequest {
+        request_id: u64,
         command: Vec<u8>,
+    },
+    ClientReply {
+        request_id: u64,
+        result: ClientResult,
     },
 }
 
@@ -67,6 +82,7 @@ pub struct Raft<SM: StateMachine> {
     last_applied: usize,
     next_index: Vec<usize>,
     match_index: Vec<usize>,
+    sessions: BTreeMap<NodeId, (u64, Vec<u8>)>,
     sm: SM,
 }
 
@@ -84,12 +100,15 @@ impl<SM: StateMachine> Raft<SM> {
             votes: 0,
             log: vec![LogEntry {
                 term: 0,
+                client: 0,
+                request_id: 0,
                 command: Vec::new(),
             }],
             commit_index: 0,
             last_applied: 0,
             next_index: vec![1; n],
             match_index: vec![0; n],
+            sessions: BTreeMap::new(),
             sm,
         }
     }
@@ -204,7 +223,7 @@ impl<SM: StateMachine> Raft<SM> {
             || (last_log_term == self.last_log_term() && last_log_index >= self.last_log_index())
     }
 
-    fn maybe_commit(&mut self) {
+    fn maybe_commit(&mut self, io: &mut Io<Message>) {
         let last = self.last_log_index();
         let mut new_commit = self.commit_index;
         for n in (self.commit_index + 1)..=last {
@@ -222,16 +241,41 @@ impl<SM: StateMachine> Raft<SM> {
         }
         if new_commit > self.commit_index {
             self.commit_index = new_commit;
-            self.apply_committed();
+            self.apply_committed(io);
         }
     }
 
-    fn apply_committed(&mut self) {
+    fn apply_committed(&mut self, io: &mut Io<Message>) {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            let command = self.log[self.last_applied].command.clone();
-            self.sm.apply(&command);
+            let entry = self.log[self.last_applied].clone();
+            let response = self.apply_entry(&entry);
+            if self.role == Role::Leader && entry.request_id != 0 {
+                io.send(
+                    entry.client,
+                    Message::ClientReply {
+                        request_id: entry.request_id,
+                        result: ClientResult::Ok(response),
+                    },
+                );
+            }
         }
+    }
+
+    fn apply_entry(&mut self, entry: &LogEntry) -> Vec<u8> {
+        if entry.request_id != 0 {
+            if let Some((last_id, last_response)) = self.sessions.get(&entry.client) {
+                if entry.request_id <= *last_id {
+                    return last_response.clone();
+                }
+            }
+        }
+        let response = self.sm.apply(&entry.command);
+        if entry.request_id != 0 {
+            self.sessions
+                .insert(entry.client, (entry.request_id, response.clone()));
+        }
+        response
     }
 }
 
@@ -345,7 +389,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
 
                 if leader_commit > self.commit_index {
                     self.commit_index = leader_commit.min(index);
-                    self.apply_committed();
+                    self.apply_committed(io);
                 }
                 io.send(
                     from,
@@ -371,22 +415,36 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 if success {
                     self.match_index[from] = match_index;
                     self.next_index[from] = match_index + 1;
-                    self.maybe_commit();
+                    self.maybe_commit(io);
                 } else if self.next_index[from] > 1 {
                     self.next_index[from] -= 1;
                     self.send_append(from, io);
                 }
             }
-            Message::ClientRequest { command } => {
+            Message::ClientRequest {
+                request_id,
+                command,
+            } => {
                 if self.role == Role::Leader {
                     self.log.push(LogEntry {
                         term: self.current_term,
+                        client: from,
+                        request_id,
                         command,
                     });
                     self.broadcast_append(io);
-                    self.maybe_commit();
+                    self.maybe_commit(io);
+                } else {
+                    io.send(
+                        from,
+                        Message::ClientReply {
+                            request_id,
+                            result: ClientResult::NotLeader(self.leader_id),
+                        },
+                    );
                 }
             }
+            Message::ClientReply { .. } => {}
         }
     }
 }

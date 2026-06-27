@@ -34,6 +34,7 @@ fn replicated_writes_land_in_the_lsm_on_every_node() {
         sim.inject(
             l,
             Message::ClientRequest {
+                request_id: u64::from(i + 1),
                 command: encode_put(key.as_bytes(), b"v"),
             },
         );
@@ -60,6 +61,7 @@ fn replicated_delete_lands_in_the_lsm() {
     sim.inject(
         l,
         Message::ClientRequest {
+            request_id: 1,
             command: encode_put(b"k", b"v"),
         },
     );
@@ -67,6 +69,7 @@ fn replicated_delete_lands_in_the_lsm() {
     sim.inject(
         l,
         Message::ClientRequest {
+            request_id: 2,
             command: encode_delete(b"k"),
         },
     );
