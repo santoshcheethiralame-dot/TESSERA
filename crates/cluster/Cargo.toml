@@ -1,0 +1,12 @@
+[package]
+name = "cluster"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim = { path = "../sim" }
+
+[dev-dependencies]
+sim = { path = "../sim" }
+consensus = { path = "../consensus" }
+lincheck = { path = "../lincheck" }
