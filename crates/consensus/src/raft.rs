@@ -22,11 +22,50 @@ pub enum Role {
 }
 
 #[derive(Clone)]
+pub struct Config {
+    old: Vec<NodeId>,
+    new: Option<Vec<NodeId>>,
+}
+
+impl Config {
+    fn simple(members: &[NodeId]) -> Self {
+        Config {
+            old: members.to_vec(),
+            new: None,
+        }
+    }
+
+    fn members(&self) -> BTreeSet<NodeId> {
+        let mut set: BTreeSet<NodeId> = self.old.iter().copied().collect();
+        if let Some(new) = &self.new {
+            set.extend(new.iter().copied());
+        }
+        set
+    }
+
+    fn contains(&self, node: NodeId) -> bool {
+        self.old.contains(&node) || self.new.as_ref().is_some_and(|n| n.contains(&node))
+    }
+
+    fn has_majority(&self, votes: &BTreeSet<NodeId>) -> bool {
+        let majority = |members: &[NodeId]| {
+            let count = members.iter().filter(|m| votes.contains(m)).count();
+            count * 2 > members.len()
+        };
+        match &self.new {
+            Some(new) => majority(&self.old) && majority(new),
+            None => majority(&self.old),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct LogEntry {
     pub term: Term,
     pub client: NodeId,
     pub request_id: u64,
     pub command: Vec<u8>,
+    pub config: Option<Config>,
 }
 
 fn sentinel(term: Term) -> LogEntry {
@@ -35,6 +74,7 @@ fn sentinel(term: Term) -> LogEntry {
         client: 0,
         request_id: 0,
         command: Vec::new(),
+        config: None,
     }
 }
 
@@ -135,6 +175,7 @@ pub enum Message {
         leader: NodeId,
         last_index: usize,
         last_term: Term,
+        config: Config,
         data: Vec<u8>,
     },
     InstallSnapshotReply {
@@ -149,12 +190,13 @@ pub enum Message {
         request_id: u64,
         result: ClientResult,
     },
+    ChangeConfig {
+        members: Vec<NodeId>,
+    },
 }
 
 pub struct Raft<SM: StateMachine> {
     id: NodeId,
-    peers: Vec<NodeId>,
-    cluster_size: usize,
     current_term: Term,
     voted_for: Option<NodeId>,
     leader_id: Option<NodeId>,
@@ -164,21 +206,19 @@ pub struct Raft<SM: StateMachine> {
     heartbeat_acks: BTreeSet<NodeId>,
     log: Log,
     snapshot: Vec<u8>,
+    snapshot_config: Config,
     commit_index: usize,
     last_applied: usize,
-    next_index: Vec<usize>,
-    match_index: Vec<usize>,
+    next_index: BTreeMap<NodeId, usize>,
+    match_index: BTreeMap<NodeId, usize>,
     sessions: BTreeMap<NodeId, (u64, Vec<u8>)>,
     sm: SM,
 }
 
 impl<SM: StateMachine> Raft<SM> {
     pub fn new(id: NodeId, cluster: &[NodeId], sm: SM) -> Self {
-        let n = cluster.len();
         Raft {
             id,
-            peers: cluster.iter().copied().filter(|&node| node != id).collect(),
-            cluster_size: n,
             current_term: 0,
             voted_for: None,
             leader_id: None,
@@ -188,10 +228,11 @@ impl<SM: StateMachine> Raft<SM> {
             heartbeat_acks: BTreeSet::new(),
             log: Log::new(),
             snapshot: Vec::new(),
+            snapshot_config: Config::simple(cluster),
             commit_index: 0,
             last_applied: 0,
-            next_index: vec![1; n],
-            match_index: vec![0; n],
+            next_index: BTreeMap::new(),
+            match_index: BTreeMap::new(),
             sessions: BTreeMap::new(),
             sm,
         }
@@ -225,8 +266,56 @@ impl<SM: StateMachine> Raft<SM> {
         self.log.entry_count()
     }
 
-    fn majority(&self) -> usize {
-        self.cluster_size / 2 + 1
+    pub fn config_members(&self) -> Vec<NodeId> {
+        self.config().members().into_iter().collect()
+    }
+
+    fn config(&self) -> Config {
+        for entry in self.log.entries.iter().rev() {
+            if let Some(cfg) = &entry.config {
+                return cfg.clone();
+            }
+        }
+        self.snapshot_config.clone()
+    }
+
+    fn latest_config_index(&self) -> usize {
+        for index in (self.log.start..=self.log.last_index()).rev() {
+            if self.log.get(index).config.is_some() {
+                return index;
+            }
+        }
+        self.log.start
+    }
+
+    fn peers(&self) -> Vec<NodeId> {
+        self.config()
+            .members()
+            .into_iter()
+            .filter(|&node| node != self.id)
+            .collect()
+    }
+
+    fn send_targets(&self) -> BTreeSet<NodeId> {
+        let mut targets = self.config().members();
+        targets.extend(self.next_index.keys().copied());
+        targets.remove(&self.id);
+        targets
+    }
+
+    fn has_majority(&self, votes: &BTreeSet<NodeId>) -> bool {
+        self.config().has_majority(votes)
+    }
+
+    fn next_for(&self, peer: NodeId) -> usize {
+        *self
+            .next_index
+            .get(&peer)
+            .unwrap_or(&(self.log.last_index() + 1))
+    }
+
+    fn match_for(&self, peer: NodeId) -> usize {
+        self.match_index.get(&peer).copied().unwrap_or(0)
     }
 
     fn reset_election_timer(&self, io: &mut Io<Message>) {
@@ -251,7 +340,7 @@ impl<SM: StateMachine> Raft<SM> {
         self.votes.clear();
         self.votes.insert(self.id);
         self.reset_election_timer(io);
-        for &peer in &self.peers {
+        for peer in self.peers() {
             io.send(
                 peer,
                 Message::RequestVote {
@@ -262,7 +351,7 @@ impl<SM: StateMachine> Raft<SM> {
                 },
             );
         }
-        if self.votes.len() >= self.majority() {
+        if self.has_majority(&self.votes) {
             self.become_leader(io);
         }
     }
@@ -270,16 +359,13 @@ impl<SM: StateMachine> Raft<SM> {
     fn become_leader(&mut self, io: &mut Io<Message>) {
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
-        self.log.push(LogEntry {
-            term: self.current_term,
-            client: 0,
-            request_id: 0,
-            command: Vec::new(),
-        });
+        self.log.push(sentinel(self.current_term));
         let next = self.log.last_index() + 1;
-        for &peer in &self.peers {
-            self.next_index[peer] = next;
-            self.match_index[peer] = 0;
+        self.next_index.clear();
+        self.match_index.clear();
+        for peer in self.peers() {
+            self.next_index.insert(peer, next);
+            self.match_index.insert(peer, 0);
         }
         self.lease_until = Time::ZERO;
         self.heartbeat_acks.clear();
@@ -288,14 +374,14 @@ impl<SM: StateMachine> Raft<SM> {
     }
 
     fn broadcast_append(&self, io: &mut Io<Message>) {
-        for &peer in &self.peers {
+        for peer in self.send_targets() {
             self.send_append(peer, io);
         }
         io.set_timer(HEARTBEAT_TIMER, millis(HEARTBEAT_INTERVAL_MS));
     }
 
     fn send_append(&self, peer: NodeId, io: &mut Io<Message>) {
-        let next = self.next_index[peer];
+        let next = self.next_for(peer);
         if next <= self.log.start {
             io.send(
                 peer,
@@ -304,6 +390,7 @@ impl<SM: StateMachine> Raft<SM> {
                     leader: self.id,
                     last_index: self.log.start,
                     last_term: self.log.term(self.log.start),
+                    config: self.config(),
                     data: self.snapshot.clone(),
                 },
             );
@@ -337,18 +424,54 @@ impl<SM: StateMachine> Raft<SM> {
             if self.log.term(n) != self.current_term {
                 continue;
             }
-            let replicas = 1 + self
-                .peers
-                .iter()
-                .filter(|&&peer| self.match_index[peer] >= n)
-                .count();
-            if replicas >= self.majority() {
+            let mut acked: BTreeSet<NodeId> = self
+                .peers()
+                .into_iter()
+                .filter(|&peer| self.match_for(peer) >= n)
+                .collect();
+            acked.insert(self.id);
+            if self.has_majority(&acked) {
                 new_commit = n;
             }
         }
         if new_commit > self.commit_index {
             self.commit_index = new_commit;
             self.apply_committed(io);
+        }
+        if self.role == Role::Leader {
+            self.advance_membership(io);
+        }
+    }
+
+    fn advance_membership(&mut self, io: &mut Io<Message>) {
+        let config = self.config();
+        if self.latest_config_index() > self.commit_index {
+            return;
+        }
+        match config.new {
+            Some(new_members) => {
+                self.log.push(LogEntry {
+                    term: self.current_term,
+                    client: 0,
+                    request_id: 0,
+                    command: Vec::new(),
+                    config: Some(Config {
+                        old: new_members,
+                        new: None,
+                    }),
+                });
+                let next = self.log.last_index() + 1;
+                for peer in self.peers() {
+                    self.next_index.entry(peer).or_insert(next);
+                    self.match_index.entry(peer).or_insert(0);
+                }
+                self.broadcast_append(io);
+            }
+            None => {
+                if !config.contains(self.id) {
+                    self.step_down(self.current_term, io);
+                }
+            }
         }
     }
 
@@ -372,12 +495,16 @@ impl<SM: StateMachine> Raft<SM> {
 
     fn maybe_snapshot(&mut self) {
         if self.log.entry_count() > SNAPSHOT_THRESHOLD && self.last_applied > self.log.start {
+            self.snapshot_config = self.config();
             self.snapshot = self.sm.snapshot();
             self.log.compact(self.last_applied);
         }
     }
 
     fn apply_entry(&mut self, entry: &LogEntry) -> Vec<u8> {
+        if entry.command.is_empty() {
+            return Vec::new();
+        }
         if entry.request_id != 0 {
             if let Some((last_id, last_response)) = self.sessions.get(&entry.client) {
                 if entry.request_id <= *last_id {
@@ -403,7 +530,9 @@ impl<SM: StateMachine> Process for Raft<SM> {
 
     fn on_timer(&mut self, timer: TimerId, io: &mut Io<Message>) {
         match timer {
-            ELECTION_TIMER if self.role != Role::Leader => self.start_election(io),
+            ELECTION_TIMER if self.role != Role::Leader && self.config().contains(self.id) => {
+                self.start_election(io)
+            }
             HEARTBEAT_TIMER if self.role == Role::Leader => {
                 self.heartbeat_acks.clear();
                 self.heartbeat_acks.insert(self.id);
@@ -446,7 +575,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 }
                 if self.role == Role::Candidate && term == self.current_term && granted {
                     self.votes.insert(from);
-                    if self.votes.len() >= self.majority() {
+                    if self.has_majority(&self.votes) {
                         self.become_leader(io);
                     }
                 }
@@ -555,17 +684,17 @@ impl<SM: StateMachine> Process for Raft<SM> {
                     return;
                 }
                 if success {
-                    if match_index > self.match_index[from] {
-                        self.match_index[from] = match_index;
-                    }
-                    self.next_index[from] = self.match_index[from] + 1;
+                    let current = self.match_for(from).max(match_index);
+                    self.match_index.insert(from, current);
+                    self.next_index.insert(from, current + 1);
                     self.maybe_commit(io);
                     self.heartbeat_acks.insert(from);
-                    if self.heartbeat_acks.len() >= self.majority() {
+                    if self.has_majority(&self.heartbeat_acks) {
                         self.lease_until = io.now() + millis(LEASE_MS);
                     }
-                } else if self.next_index[from] > 1 {
-                    self.next_index[from] -= 1;
+                } else {
+                    let next = self.next_for(from).saturating_sub(1).max(1);
+                    self.next_index.insert(from, next);
                     self.send_append(from, io);
                 }
             }
@@ -574,6 +703,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 leader,
                 last_index,
                 last_term,
+                config,
                 data,
             } => {
                 if term < self.current_term {
@@ -598,6 +728,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 if last_index > self.log.start {
                     self.sm.restore(&data);
                     self.snapshot = data;
+                    self.snapshot_config = config;
                     self.log.install(last_index, last_term);
                     self.commit_index = self.commit_index.max(last_index);
                     self.last_applied = last_index;
@@ -618,10 +749,9 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 if self.role != Role::Leader || term != self.current_term {
                     return;
                 }
-                if match_index > self.match_index[from] {
-                    self.match_index[from] = match_index;
-                }
-                self.next_index[from] = self.match_index[from] + 1;
+                let current = self.match_for(from).max(match_index);
+                self.match_index.insert(from, current);
+                self.next_index.insert(from, current + 1);
                 self.maybe_commit(io);
             }
             Message::ClientRequest {
@@ -651,9 +781,31 @@ impl<SM: StateMachine> Process for Raft<SM> {
                         client: from,
                         request_id,
                         command,
+                        config: None,
                     });
                     self.broadcast_append(io);
                     self.maybe_commit(io);
+                }
+            }
+            Message::ChangeConfig { members } => {
+                if self.role == Role::Leader && self.config().new.is_none() {
+                    let old = self.config().old;
+                    self.log.push(LogEntry {
+                        term: self.current_term,
+                        client: 0,
+                        request_id: 0,
+                        command: Vec::new(),
+                        config: Some(Config {
+                            old,
+                            new: Some(members),
+                        }),
+                    });
+                    let next = self.log.last_index() + 1;
+                    for peer in self.peers() {
+                        self.next_index.entry(peer).or_insert(next);
+                        self.match_index.entry(peer).or_insert(0);
+                    }
+                    self.broadcast_append(io);
                 }
             }
             Message::ClientReply { .. } => {}
