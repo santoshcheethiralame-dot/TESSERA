@@ -23,7 +23,12 @@ struct IndexEntry {
     len: u32,
 }
 
-pub fn write<D: Disk>(disk: &D, name: &str, entries: &[(Vec<u8>, u64, Op)]) -> io::Result<()> {
+pub fn write<D: Disk>(
+    disk: &D,
+    name: &str,
+    entries: &[(Vec<u8>, u64, Op)],
+    max_seq: u64,
+) -> io::Result<()> {
     disk.create(name)?;
     let mut bloom = Bloom::new(entries.len(), 10);
     let mut index: Vec<IndexEntry> = Vec::new();
@@ -65,7 +70,6 @@ pub fn write<D: Disk>(disk: &D, name: &str, entries: &[(Vec<u8>, u64, Op)]) -> i
     let index_offset = offset;
     disk.append(name, &index_bytes)?;
 
-    let max_seq = entries.iter().map(|(_, seq, _)| *seq).max().unwrap_or(0);
     let footer = encode_footer(
         index_offset,
         index_bytes.len() as u64,
@@ -122,6 +126,24 @@ impl SsTable {
         };
         let block = disk.read_at(&self.name, entry.offset, entry.len as usize)?;
         scan_block(&block, key, snapshot)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn scan<D: Disk>(&self, disk: &D) -> io::Result<Vec<(Vec<u8>, u64, Op)>> {
+        let mut out = Vec::new();
+        for entry in &self.index {
+            let block = disk.read_at(&self.name, entry.offset, entry.len as usize)?;
+            let mut pos = 0;
+            while pos < block.len() {
+                let (user, seq, op, next) = decode_entry(&block, pos)?;
+                out.push((user, seq, op));
+                pos = next;
+            }
+        }
+        Ok(out)
     }
 }
 

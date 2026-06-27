@@ -79,6 +79,7 @@ fn auto_flush_produces_multiple_sstables() {
     let disk = MemDisk::new();
     let mut db = Db::open(disk.clone()).unwrap();
     db.set_flush_threshold(64);
+    db.set_compaction_threshold(10_000);
     for i in 0..200u32 {
         let key = format!("key{i:04}");
         let value = format!("val{i:04}");

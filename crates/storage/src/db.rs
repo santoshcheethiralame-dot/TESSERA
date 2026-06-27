@@ -8,6 +8,7 @@ use crate::wal::{self, Record};
 const WAL: &str = "wal";
 const SST_PREFIX: &str = "sst-";
 const DEFAULT_FLUSH_BYTES: usize = 1 << 20;
+const DEFAULT_COMPACTION_TABLES: usize = 4;
 
 pub struct Db<D: Disk> {
     disk: D,
@@ -16,6 +17,7 @@ pub struct Db<D: Disk> {
     next_seq: u64,
     next_sst: u64,
     flush_bytes: usize,
+    compaction_tables: usize,
 }
 
 impl<D: Disk> Db<D> {
@@ -59,6 +61,7 @@ impl<D: Disk> Db<D> {
             next_seq,
             next_sst,
             flush_bytes: DEFAULT_FLUSH_BYTES,
+            compaction_tables: DEFAULT_COMPACTION_TABLES,
         })
     }
 
@@ -112,12 +115,49 @@ impl<D: Disk> Db<D> {
         let name = format!("{SST_PREFIX}{number:06}");
         let tmp = format!("{name}.tmp");
         let entries = frozen.into_entries();
-        sstable::write(&self.disk, &tmp, &entries)?;
+        sstable::write(&self.disk, &tmp, &entries, self.next_seq - 1)?;
         self.disk.rename(&tmp, &name)?;
         let table = SsTable::open(&self.disk, &name)?;
         self.tables.insert(0, table);
         self.disk.create(WAL)?;
         self.disk.sync(WAL)?;
+        self.maybe_compact()
+    }
+
+    pub fn compact(&mut self) -> io::Result<()> {
+        if self.tables.len() < 2 {
+            return Ok(());
+        }
+        let mut entries = Vec::new();
+        for table in &self.tables {
+            entries.extend(table.scan(&self.disk)?);
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+        let mut merged = Vec::new();
+        let mut last: Option<Vec<u8>> = None;
+        for (user, seq, op) in entries {
+            if last.as_deref() == Some(user.as_slice()) {
+                continue;
+            }
+            last = Some(user.clone());
+            if matches!(op, Op::Put(_)) {
+                merged.push((user, seq, op));
+            }
+        }
+
+        let obsolete: Vec<String> = self.tables.iter().map(|t| t.name().to_string()).collect();
+        let number = self.next_sst;
+        self.next_sst += 1;
+        let name = format!("{SST_PREFIX}{number:06}");
+        let tmp = format!("{name}.tmp");
+        sstable::write(&self.disk, &tmp, &merged, self.next_seq - 1)?;
+        self.disk.rename(&tmp, &name)?;
+        let table = SsTable::open(&self.disk, &name)?;
+        self.tables = vec![table];
+        for old in obsolete {
+            self.disk.remove(&old)?;
+        }
         Ok(())
     }
 
@@ -129,6 +169,10 @@ impl<D: Disk> Db<D> {
         self.flush_bytes = bytes;
     }
 
+    pub fn set_compaction_threshold(&mut self, tables: usize) {
+        self.compaction_tables = tables.max(2);
+    }
+
     fn take_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -138,6 +182,13 @@ impl<D: Disk> Db<D> {
     fn maybe_flush(&mut self) -> io::Result<()> {
         if self.memtable.bytes() >= self.flush_bytes {
             self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn maybe_compact(&mut self) -> io::Result<()> {
+        if self.tables.len() >= self.compaction_tables {
+            self.compact()?;
         }
         Ok(())
     }
