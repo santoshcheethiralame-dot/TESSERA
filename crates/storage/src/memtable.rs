@@ -45,6 +45,12 @@ impl Memtable {
         }
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], u64, &Op)> {
+        self.entries
+            .iter()
+            .map(|((key, seq), op)| (key.as_slice(), seq.0, op))
+    }
+
     pub fn into_entries(self) -> Vec<(Vec<u8>, u64, Op)> {
         self.entries
             .into_iter()

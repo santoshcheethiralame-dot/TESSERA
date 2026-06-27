@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 pub trait StateMachine {
     fn apply(&mut self, command: &[u8]) -> Vec<u8>;
+    fn snapshot(&self) -> Vec<u8>;
+    fn restore(&mut self, snapshot: &[u8]);
 }
 
 pub enum KvCommand {
@@ -38,6 +40,34 @@ impl StateMachine for KvStore {
             }
             Some(KvCommand::Get(key)) => encode_value(self.map.get(&key).map(|v| v.as_slice())),
             None => Vec::new(),
+        }
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.map.len() as u32).to_le_bytes());
+        for (key, value) in &self.map {
+            put_bytes(&mut buf, key);
+            put_bytes(&mut buf, value);
+        }
+        buf
+    }
+
+    fn restore(&mut self, snapshot: &[u8]) {
+        self.map.clear();
+        if snapshot.len() < 4 {
+            return;
+        }
+        let count = u32::from_le_bytes(snapshot[0..4].try_into().unwrap()) as usize;
+        let mut pos = 4;
+        for _ in 0..count {
+            let Some(key) = take(snapshot, &mut pos) else {
+                break;
+            };
+            let Some(value) = take(snapshot, &mut pos) else {
+                break;
+            };
+            self.map.insert(key, value);
         }
     }
 }

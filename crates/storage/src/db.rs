@@ -105,6 +105,29 @@ impl<D: Disk> Db<D> {
         Ok(None)
     }
 
+    pub fn scan(&self) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut entries: Vec<(Vec<u8>, u64, Op)> = Vec::new();
+        for (key, seq, op) in self.memtable.iter() {
+            entries.push((key.to_vec(), seq, op.clone()));
+        }
+        for table in &self.tables {
+            entries.extend(table.scan(&self.disk)?);
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        let mut out = Vec::new();
+        let mut last: Option<Vec<u8>> = None;
+        for (key, _, op) in entries {
+            if last.as_deref() == Some(key.as_slice()) {
+                continue;
+            }
+            last = Some(key.clone());
+            if let Op::Put(value) = op {
+                out.push((key, value));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn flush(&mut self) -> io::Result<()> {
         if self.memtable.is_empty() {
             return Ok(());

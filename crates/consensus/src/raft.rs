@@ -11,6 +11,7 @@ const HEARTBEAT_TIMER: TimerId = 1;
 const HEARTBEAT_INTERVAL_MS: u64 = 50;
 const ELECTION_MIN_MS: u64 = 150;
 const ELECTION_MAX_MS: u64 = 300;
+const SNAPSHOT_THRESHOLD: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -25,6 +26,76 @@ pub struct LogEntry {
     pub client: NodeId,
     pub request_id: u64,
     pub command: Vec<u8>,
+}
+
+fn sentinel(term: Term) -> LogEntry {
+    LogEntry {
+        term,
+        client: 0,
+        request_id: 0,
+        command: Vec::new(),
+    }
+}
+
+struct Log {
+    start: usize,
+    entries: Vec<LogEntry>,
+}
+
+impl Log {
+    fn new() -> Self {
+        Log {
+            start: 0,
+            entries: vec![sentinel(0)],
+        }
+    }
+
+    fn last_index(&self) -> usize {
+        self.start + self.entries.len() - 1
+    }
+
+    fn last_term(&self) -> Term {
+        self.entries.last().unwrap().term
+    }
+
+    fn term(&self, index: usize) -> Term {
+        self.entries[index - self.start].term
+    }
+
+    fn get(&self, index: usize) -> &LogEntry {
+        &self.entries[index - self.start]
+    }
+
+    fn has(&self, index: usize) -> bool {
+        index >= self.start && index <= self.last_index()
+    }
+
+    fn slice_from(&self, index: usize) -> Vec<LogEntry> {
+        self.entries[index - self.start..].to_vec()
+    }
+
+    fn truncate(&mut self, index: usize) {
+        self.entries.truncate(index - self.start);
+    }
+
+    fn push(&mut self, entry: LogEntry) {
+        self.entries.push(entry);
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn compact(&mut self, up_to: usize) {
+        let offset = up_to - self.start;
+        self.entries.drain(0..offset);
+        self.start = up_to;
+    }
+
+    fn install(&mut self, last_index: usize, last_term: Term) {
+        self.start = last_index;
+        self.entries = vec![sentinel(last_term)];
+    }
 }
 
 #[derive(Clone)]
@@ -58,6 +129,17 @@ pub enum Message {
         success: bool,
         match_index: usize,
     },
+    InstallSnapshot {
+        term: Term,
+        leader: NodeId,
+        last_index: usize,
+        last_term: Term,
+        data: Vec<u8>,
+    },
+    InstallSnapshotReply {
+        term: Term,
+        match_index: usize,
+    },
     ClientRequest {
         request_id: u64,
         command: Vec<u8>,
@@ -77,7 +159,8 @@ pub struct Raft<SM: StateMachine> {
     leader_id: Option<NodeId>,
     role: Role,
     votes: BTreeSet<NodeId>,
-    log: Vec<LogEntry>,
+    log: Log,
+    snapshot: Vec<u8>,
     commit_index: usize,
     last_applied: usize,
     next_index: Vec<usize>,
@@ -98,12 +181,8 @@ impl<SM: StateMachine> Raft<SM> {
             leader_id: None,
             role: Role::Follower,
             votes: BTreeSet::new(),
-            log: vec![LogEntry {
-                term: 0,
-                client: 0,
-                request_id: 0,
-                command: Vec::new(),
-            }],
+            log: Log::new(),
+            snapshot: Vec::new(),
             commit_index: 0,
             last_applied: 0,
             next_index: vec![1; n],
@@ -133,16 +212,16 @@ impl<SM: StateMachine> Raft<SM> {
         &self.sm
     }
 
+    pub fn snapshot_index(&self) -> usize {
+        self.log.start
+    }
+
+    pub fn log_entry_count(&self) -> usize {
+        self.log.entry_count()
+    }
+
     fn majority(&self) -> usize {
         self.cluster_size / 2 + 1
-    }
-
-    fn last_log_index(&self) -> usize {
-        self.log.len() - 1
-    }
-
-    fn last_log_term(&self) -> Term {
-        self.log[self.log.len() - 1].term
     }
 
     fn reset_election_timer(&self, io: &mut Io<Message>) {
@@ -173,8 +252,8 @@ impl<SM: StateMachine> Raft<SM> {
                 Message::RequestVote {
                     term: self.current_term,
                     candidate: self.id,
-                    last_log_index: self.last_log_index(),
-                    last_log_term: self.last_log_term(),
+                    last_log_index: self.log.last_index(),
+                    last_log_term: self.log.last_term(),
                 },
             );
         }
@@ -186,7 +265,7 @@ impl<SM: StateMachine> Raft<SM> {
     fn become_leader(&mut self, io: &mut Io<Message>) {
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
-        let next = self.last_log_index() + 1;
+        let next = self.log.last_index() + 1;
         for &peer in &self.peers {
             self.next_index[peer] = next;
             self.match_index[peer] = 0;
@@ -203,9 +282,22 @@ impl<SM: StateMachine> Raft<SM> {
 
     fn send_append(&self, peer: NodeId, io: &mut Io<Message>) {
         let next = self.next_index[peer];
+        if next <= self.log.start {
+            io.send(
+                peer,
+                Message::InstallSnapshot {
+                    term: self.current_term,
+                    leader: self.id,
+                    last_index: self.log.start,
+                    last_term: self.log.term(self.log.start),
+                    data: self.snapshot.clone(),
+                },
+            );
+            return;
+        }
         let prev_log_index = next - 1;
-        let prev_log_term = self.log[prev_log_index].term;
-        let entries = self.log[next..].to_vec();
+        let prev_log_term = self.log.term(prev_log_index);
+        let entries = self.log.slice_from(next);
         io.send(
             peer,
             Message::AppendEntries {
@@ -220,15 +312,15 @@ impl<SM: StateMachine> Raft<SM> {
     }
 
     fn up_to_date(&self, last_log_index: usize, last_log_term: Term) -> bool {
-        last_log_term > self.last_log_term()
-            || (last_log_term == self.last_log_term() && last_log_index >= self.last_log_index())
+        last_log_term > self.log.last_term()
+            || (last_log_term == self.log.last_term() && last_log_index >= self.log.last_index())
     }
 
     fn maybe_commit(&mut self, io: &mut Io<Message>) {
-        let last = self.last_log_index();
+        let last = self.log.last_index();
         let mut new_commit = self.commit_index;
         for n in (self.commit_index + 1)..=last {
-            if self.log[n].term != self.current_term {
+            if self.log.term(n) != self.current_term {
                 continue;
             }
             let replicas = 1 + self
@@ -249,7 +341,7 @@ impl<SM: StateMachine> Raft<SM> {
     fn apply_committed(&mut self, io: &mut Io<Message>) {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            let entry = self.log[self.last_applied].clone();
+            let entry = self.log.get(self.last_applied).clone();
             let response = self.apply_entry(&entry);
             if self.role == Role::Leader && entry.request_id != 0 {
                 io.send(
@@ -260,6 +352,14 @@ impl<SM: StateMachine> Raft<SM> {
                     },
                 );
             }
+        }
+        self.maybe_snapshot();
+    }
+
+    fn maybe_snapshot(&mut self) {
+        if self.log.entry_count() > SNAPSHOT_THRESHOLD && self.last_applied > self.log.start {
+            self.snapshot = self.sm.snapshot();
+            self.log.compact(self.last_applied);
         }
     }
 
@@ -361,8 +461,31 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 self.votes.clear();
                 self.reset_election_timer(io);
 
-                if prev_log_index > self.last_log_index()
-                    || self.log[prev_log_index].term != prev_log_term
+                let mut prev_log_index = prev_log_index;
+                let mut prev_log_term = prev_log_term;
+                let mut entries = entries;
+                if prev_log_index < self.log.start {
+                    let sent_through = prev_log_index + entries.len();
+                    let skip = self.log.start - prev_log_index;
+                    if skip < entries.len() {
+                        entries.drain(0..skip);
+                        prev_log_index = self.log.start;
+                        prev_log_term = self.log.term(self.log.start);
+                    } else {
+                        io.send(
+                            from,
+                            Message::AppendEntriesReply {
+                                term: self.current_term,
+                                success: true,
+                                match_index: sent_through,
+                            },
+                        );
+                        return;
+                    }
+                }
+
+                if prev_log_index > self.log.last_index()
+                    || self.log.term(prev_log_index) != prev_log_term
                 {
                     io.send(
                         from,
@@ -378,8 +501,8 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 let mut index = prev_log_index;
                 for entry in entries {
                     index += 1;
-                    if index <= self.last_log_index() {
-                        if self.log[index].term != entry.term {
+                    if self.log.has(index) {
+                        if self.log.term(index) != entry.term {
                             self.log.truncate(index);
                             self.log.push(entry);
                         }
@@ -414,13 +537,70 @@ impl<SM: StateMachine> Process for Raft<SM> {
                     return;
                 }
                 if success {
-                    self.match_index[from] = match_index;
-                    self.next_index[from] = match_index + 1;
+                    if match_index > self.match_index[from] {
+                        self.match_index[from] = match_index;
+                    }
+                    self.next_index[from] = self.match_index[from] + 1;
                     self.maybe_commit(io);
                 } else if self.next_index[from] > 1 {
                     self.next_index[from] -= 1;
                     self.send_append(from, io);
                 }
+            }
+            Message::InstallSnapshot {
+                term,
+                leader,
+                last_index,
+                last_term,
+                data,
+            } => {
+                if term < self.current_term {
+                    io.send(
+                        from,
+                        Message::InstallSnapshotReply {
+                            term: self.current_term,
+                            match_index: 0,
+                        },
+                    );
+                    return;
+                }
+                if term > self.current_term {
+                    self.current_term = term;
+                    self.voted_for = None;
+                }
+                self.role = Role::Follower;
+                self.leader_id = Some(leader);
+                self.votes.clear();
+                self.reset_election_timer(io);
+
+                if last_index > self.log.start {
+                    self.sm.restore(&data);
+                    self.snapshot = data;
+                    self.log.install(last_index, last_term);
+                    self.commit_index = self.commit_index.max(last_index);
+                    self.last_applied = last_index;
+                }
+                io.send(
+                    from,
+                    Message::InstallSnapshotReply {
+                        term: self.current_term,
+                        match_index: self.log.last_index(),
+                    },
+                );
+            }
+            Message::InstallSnapshotReply { term, match_index } => {
+                if term > self.current_term {
+                    self.step_down(term, io);
+                    return;
+                }
+                if self.role != Role::Leader || term != self.current_term {
+                    return;
+                }
+                if match_index > self.match_index[from] {
+                    self.match_index[from] = match_index;
+                }
+                self.next_index[from] = self.match_index[from] + 1;
+                self.maybe_commit(io);
             }
             Message::ClientRequest {
                 request_id,
