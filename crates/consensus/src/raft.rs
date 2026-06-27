@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use sim::{millis, Io, NodeId, Process, TimerId};
+use sim::{millis, Io, NodeId, Process, Time, TimerId};
 
 use crate::kv::StateMachine;
 
@@ -12,6 +12,7 @@ const HEARTBEAT_INTERVAL_MS: u64 = 50;
 const ELECTION_MIN_MS: u64 = 150;
 const ELECTION_MAX_MS: u64 = 300;
 const SNAPSHOT_THRESHOLD: usize = 64;
+const LEASE_MS: u64 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -159,6 +160,8 @@ pub struct Raft<SM: StateMachine> {
     leader_id: Option<NodeId>,
     role: Role,
     votes: BTreeSet<NodeId>,
+    lease_until: Time,
+    heartbeat_acks: BTreeSet<NodeId>,
     log: Log,
     snapshot: Vec<u8>,
     commit_index: usize,
@@ -181,6 +184,8 @@ impl<SM: StateMachine> Raft<SM> {
             leader_id: None,
             role: Role::Follower,
             votes: BTreeSet::new(),
+            lease_until: Time::ZERO,
+            heartbeat_acks: BTreeSet::new(),
             log: Log::new(),
             snapshot: Vec::new(),
             commit_index: 0,
@@ -265,11 +270,20 @@ impl<SM: StateMachine> Raft<SM> {
     fn become_leader(&mut self, io: &mut Io<Message>) {
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
+        self.log.push(LogEntry {
+            term: self.current_term,
+            client: 0,
+            request_id: 0,
+            command: Vec::new(),
+        });
         let next = self.log.last_index() + 1;
         for &peer in &self.peers {
             self.next_index[peer] = next;
             self.match_index[peer] = 0;
         }
+        self.lease_until = Time::ZERO;
+        self.heartbeat_acks.clear();
+        self.heartbeat_acks.insert(self.id);
         self.broadcast_append(io);
     }
 
@@ -390,7 +404,11 @@ impl<SM: StateMachine> Process for Raft<SM> {
     fn on_timer(&mut self, timer: TimerId, io: &mut Io<Message>) {
         match timer {
             ELECTION_TIMER if self.role != Role::Leader => self.start_election(io),
-            HEARTBEAT_TIMER if self.role == Role::Leader => self.broadcast_append(io),
+            HEARTBEAT_TIMER if self.role == Role::Leader => {
+                self.heartbeat_acks.clear();
+                self.heartbeat_acks.insert(self.id);
+                self.broadcast_append(io);
+            }
             _ => {}
         }
     }
@@ -542,6 +560,10 @@ impl<SM: StateMachine> Process for Raft<SM> {
                     }
                     self.next_index[from] = self.match_index[from] + 1;
                     self.maybe_commit(io);
+                    self.heartbeat_acks.insert(from);
+                    if self.heartbeat_acks.len() >= self.majority() {
+                        self.lease_until = io.now() + millis(LEASE_MS);
+                    }
                 } else if self.next_index[from] > 1 {
                     self.next_index[from] -= 1;
                     self.send_append(from, io);
@@ -606,7 +628,24 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 request_id,
                 command,
             } => {
-                if self.role == Role::Leader {
+                if self.role != Role::Leader {
+                    io.send(
+                        from,
+                        Message::ClientReply {
+                            request_id,
+                            result: ClientResult::NotLeader(self.leader_id),
+                        },
+                    );
+                } else if crate::kv::is_read(&command) && io.now() <= self.lease_until {
+                    let response = self.sm.apply(&command);
+                    io.send(
+                        from,
+                        Message::ClientReply {
+                            request_id,
+                            result: ClientResult::Ok(response),
+                        },
+                    );
+                } else {
                     self.log.push(LogEntry {
                         term: self.current_term,
                         client: from,
@@ -615,14 +654,6 @@ impl<SM: StateMachine> Process for Raft<SM> {
                     });
                     self.broadcast_append(io);
                     self.maybe_commit(io);
-                } else {
-                    io.send(
-                        from,
-                        Message::ClientReply {
-                            request_id,
-                            result: ClientResult::NotLeader(self.leader_id),
-                        },
-                    );
                 }
             }
             Message::ClientReply { .. } => {}

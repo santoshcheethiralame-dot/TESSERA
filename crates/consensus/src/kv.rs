@@ -103,6 +103,10 @@ pub fn decode_command(bytes: &[u8]) -> Option<KvCommand> {
     }
 }
 
+pub fn is_read(command: &[u8]) -> bool {
+    command.first() == Some(&2)
+}
+
 pub fn encode_value(value: Option<&[u8]>) -> Vec<u8> {
     match value {
         Some(v) => {
