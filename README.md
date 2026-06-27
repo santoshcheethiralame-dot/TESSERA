@@ -25,8 +25,8 @@ The rules that keep it deterministic: a single seeded RNG, an event queue ordere
 - [x] Simulation kernel: seeded RNG, virtual clock, event scheduler, network faults, partitions
 - [x] LSM storage engine: WAL, MVCC memtable, SSTables, bloom filters, compaction, crash recovery
 - [x] Raft group and KV state machine (election, log replication, LSM-backed apply)
-- [ ] Linearizability checker and chaos fuzzing
-- [ ] Snapshots, leases, joint-consensus membership
+- [x] Linearizability checker and chaos fuzzing (Wing-Gong checker; seed-reproducible; caught a real split-brain bug)
+- [x] Snapshots, leases, joint-consensus membership
 - [ ] Sharding, coordinator, routing client
 - [ ] Benchmarks vs etcd and RocksDB
 
