@@ -262,6 +262,10 @@ impl<SM: StateMachine> Raft<SM> {
         self.log.start
     }
 
+    pub fn commit_index(&self) -> usize {
+        self.commit_index
+    }
+
     pub fn log_entry_count(&self) -> usize {
         self.log.entry_count()
     }

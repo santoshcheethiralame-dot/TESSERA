@@ -28,10 +28,12 @@ The rules that keep it deterministic: a single seeded RNG, an event queue ordere
 - [x] Linearizability checker and chaos fuzzing (Wing-Gong checker; seed-reproducible; caught a real split-brain bug)
 - [x] Snapshots, leases, joint-consensus membership
 - [x] Sharding, coordinator, routing client
-- [ ] Benchmarks vs etcd and RocksDB
+- [x] Benchmarks — storage on real disk, distributed in the simulator ([BENCHMARKS.md](BENCHMARKS.md))
 
-## Build
+## Build & run
 
 ```
-cargo test
+cargo test                                           # full deterministic test suite
+cargo test -p consensus --test chaos -- --ignored    # 1000-seed linearizability fuzz
+cargo run --release -p bench                          # benchmarks (see BENCHMARKS.md)
 ```

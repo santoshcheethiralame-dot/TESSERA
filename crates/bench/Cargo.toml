@@ -1,0 +1,9 @@
+[package]
+name = "bench"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+storage = { path = "../storage" }
+consensus = { path = "../consensus" }
+sim = { path = "../sim" }

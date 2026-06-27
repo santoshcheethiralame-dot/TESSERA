@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "bench"
+version = "0.1.0"
+dependencies = [
+ "consensus",
+ "sim",
+ "storage",
+]
+
+[[package]]
 name = "cluster"
 version = "0.1.0"
 dependencies = [

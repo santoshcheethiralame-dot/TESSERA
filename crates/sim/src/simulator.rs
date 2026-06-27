@@ -244,6 +244,7 @@ impl<P: Process> Simulator<P> {
                 }
             }
         }
+        self.clock = self.clock.max(deadline);
     }
 
     fn next_seq(&mut self) -> u64 {
