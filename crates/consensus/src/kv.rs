@@ -1,0 +1,77 @@
+use std::collections::BTreeMap;
+
+pub trait StateMachine {
+    fn apply(&mut self, command: &[u8]) -> Vec<u8>;
+}
+
+#[derive(Default)]
+pub struct KvStore {
+    map: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl KvStore {
+    pub fn new() -> Self {
+        KvStore::default()
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.map.get(key).cloned()
+    }
+}
+
+impl StateMachine for KvStore {
+    fn apply(&mut self, command: &[u8]) -> Vec<u8> {
+        match decode(command) {
+            Some(Command::Put(key, value)) => {
+                self.map.insert(key, value);
+            }
+            Some(Command::Delete(key)) => {
+                self.map.remove(&key);
+            }
+            None => {}
+        }
+        Vec::new()
+    }
+}
+
+enum Command {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
+pub fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut buf = vec![1];
+    put_bytes(&mut buf, key);
+    put_bytes(&mut buf, value);
+    buf
+}
+
+pub fn encode_delete(key: &[u8]) -> Vec<u8> {
+    let mut buf = vec![0];
+    put_bytes(&mut buf, key);
+    buf
+}
+
+fn decode(bytes: &[u8]) -> Option<Command> {
+    let tag = *bytes.first()?;
+    let mut pos = 1;
+    let key = take(bytes, &mut pos)?;
+    match tag {
+        1 => Some(Command::Put(key, take(bytes, &mut pos)?)),
+        0 => Some(Command::Delete(key)),
+        _ => None,
+    }
+}
+
+fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn take(bytes: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+    let len = u32::from_le_bytes(bytes.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
+    *pos += 4;
+    let out = bytes.get(*pos..*pos + len)?.to_vec();
+    *pos += len;
+    Some(out)
+}

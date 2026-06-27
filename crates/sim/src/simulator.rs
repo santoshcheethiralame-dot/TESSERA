@@ -169,6 +169,19 @@ impl<P: Process> Simulator<P> {
         &mut self.partitions
     }
 
+    pub fn inject(&mut self, to: NodeId, msg: P::Message) {
+        let seq = self.next_seq();
+        self.queue.push(Reverse(Entry {
+            at: self.clock,
+            seq,
+            wake: Wake::Deliver {
+                to,
+                from: usize::MAX,
+                msg,
+            },
+        }));
+    }
+
     pub fn now(&self) -> Time {
         self.clock
     }

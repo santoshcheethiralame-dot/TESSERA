@@ -1,13 +1,16 @@
-use consensus::Raft;
+use consensus::{KvStore, Raft};
 use sim::{secs, Simulator};
 
-fn cluster(n: usize, seed: u64) -> Simulator<Raft> {
+fn cluster(n: usize, seed: u64) -> Simulator<Raft<KvStore>> {
     let ids: Vec<usize> = (0..n).collect();
-    let nodes: Vec<Raft> = ids.iter().map(|&id| Raft::new(id, &ids)).collect();
+    let nodes: Vec<Raft<KvStore>> = ids
+        .iter()
+        .map(|&id| Raft::new(id, &ids, KvStore::new()))
+        .collect();
     Simulator::new(seed, nodes)
 }
 
-fn leaders(sim: &Simulator<Raft>) -> Vec<usize> {
+fn leaders(sim: &Simulator<Raft<KvStore>>) -> Vec<usize> {
     (0..sim.nodes())
         .filter(|&i| sim.process(i).is_leader())
         .collect()
