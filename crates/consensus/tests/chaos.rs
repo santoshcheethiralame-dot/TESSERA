@@ -250,3 +250,30 @@ fn checker_catches_an_injected_violation() {
     });
     assert!(!linearizable(&h));
 }
+
+#[test]
+#[ignore = "deep fuzz: cargo test -- --ignored"]
+fn stress_linearizable_many_seeds() {
+    for seed in 0..1000u64 {
+        let mut sim = build(5, 3, 10, seed);
+        sim.set_network(NetworkConfig {
+            min_latency: millis(1),
+            max_latency: millis(15),
+            drop_prob: 0.05,
+            duplicate_prob: 0.03,
+        });
+        let mut nemesis = Rng::new(seed ^ 0x00c0_ffee);
+        for _ in 0..10 {
+            let pivot = nemesis.gen_range(1, 5) as usize;
+            let left: Vec<usize> = (0..pivot).collect();
+            let right: Vec<usize> = (pivot..5).collect();
+            sim.partitions_mut().split(&[left, right]);
+            sim.run_for(millis(300));
+            sim.partitions_mut().heal_all();
+            sim.run_for(millis(300));
+        }
+        sim.run_for(secs(40));
+        let h = history(&sim, 5, 3);
+        assert!(linearizable(&h), "non-linearizable at seed {seed}");
+    }
+}

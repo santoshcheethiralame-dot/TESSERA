@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sim::{millis, Io, NodeId, Process, TimerId};
 
@@ -76,7 +76,7 @@ pub struct Raft<SM: StateMachine> {
     voted_for: Option<NodeId>,
     leader_id: Option<NodeId>,
     role: Role,
-    votes: usize,
+    votes: BTreeSet<NodeId>,
     log: Vec<LogEntry>,
     commit_index: usize,
     last_applied: usize,
@@ -97,7 +97,7 @@ impl<SM: StateMachine> Raft<SM> {
             voted_for: None,
             leader_id: None,
             role: Role::Follower,
-            votes: 0,
+            votes: BTreeSet::new(),
             log: vec![LogEntry {
                 term: 0,
                 client: 0,
@@ -155,7 +155,7 @@ impl<SM: StateMachine> Raft<SM> {
         self.role = Role::Follower;
         self.voted_for = None;
         self.leader_id = None;
-        self.votes = 0;
+        self.votes.clear();
         self.reset_election_timer(io);
     }
 
@@ -164,7 +164,8 @@ impl<SM: StateMachine> Raft<SM> {
         self.current_term += 1;
         self.voted_for = Some(self.id);
         self.leader_id = None;
-        self.votes = 1;
+        self.votes.clear();
+        self.votes.insert(self.id);
         self.reset_election_timer(io);
         for &peer in &self.peers {
             io.send(
@@ -177,7 +178,7 @@ impl<SM: StateMachine> Raft<SM> {
                 },
             );
         }
-        if self.votes >= self.majority() {
+        if self.votes.len() >= self.majority() {
             self.become_leader(io);
         }
     }
@@ -326,8 +327,8 @@ impl<SM: StateMachine> Process for Raft<SM> {
                     return;
                 }
                 if self.role == Role::Candidate && term == self.current_term && granted {
-                    self.votes += 1;
-                    if self.votes >= self.majority() {
+                    self.votes.insert(from);
+                    if self.votes.len() >= self.majority() {
                         self.become_leader(io);
                     }
                 }
@@ -357,7 +358,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
                 }
                 self.role = Role::Follower;
                 self.leader_id = Some(leader);
-                self.votes = 0;
+                self.votes.clear();
                 self.reset_election_timer(io);
 
                 if prev_log_index > self.last_log_index()
