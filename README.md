@@ -27,7 +27,7 @@ The rules that keep it deterministic: a single seeded RNG, an event queue ordere
 - [x] Raft group and KV state machine (election, log replication, LSM-backed apply)
 - [x] Linearizability checker and chaos fuzzing (Wing-Gong checker; seed-reproducible; caught a real split-brain bug)
 - [x] Snapshots, leases, joint-consensus membership
-- [ ] Sharding, coordinator, routing client
+- [x] Sharding, coordinator, routing client
 - [ ] Benchmarks vs etcd and RocksDB
 
 ## Build
