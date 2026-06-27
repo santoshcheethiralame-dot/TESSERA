@@ -37,6 +37,29 @@ impl Partitions {
         self.blocked.insert((b, a));
     }
 
+    pub fn isolate(&mut self, node: NodeId, all: &[NodeId]) {
+        for &other in all {
+            if other != node {
+                self.cut(node, other);
+            }
+        }
+    }
+
+    pub fn split(&mut self, groups: &[Vec<NodeId>]) {
+        self.heal_all();
+        for (i, left) in groups.iter().enumerate() {
+            for (j, right) in groups.iter().enumerate() {
+                if i != j {
+                    for &a in left {
+                        for &b in right {
+                            self.blocked.insert((a, b));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn heal_all(&mut self) {
         self.blocked.clear();
     }

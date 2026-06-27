@@ -1,0 +1,10 @@
+[package]
+name = "consensus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim = { path = "../sim" }
+
+[dev-dependencies]
+sim = { path = "../sim" }
