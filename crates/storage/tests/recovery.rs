@@ -5,15 +5,15 @@ fn put_get_delete_with_overwrite() {
     let mut db = Db::open(MemDisk::new()).unwrap();
     db.put(b"a", b"1").unwrap();
     db.put(b"b", b"2").unwrap();
-    assert_eq!(db.get(b"a"), Some(b"1".to_vec()));
-    assert_eq!(db.get(b"b"), Some(b"2".to_vec()));
+    assert_eq!(db.get(b"a").unwrap(), Some(b"1".to_vec()));
+    assert_eq!(db.get(b"b").unwrap(), Some(b"2".to_vec()));
 
     db.put(b"a", b"3").unwrap();
-    assert_eq!(db.get(b"a"), Some(b"3".to_vec()));
+    assert_eq!(db.get(b"a").unwrap(), Some(b"3".to_vec()));
 
     db.delete(b"a").unwrap();
-    assert_eq!(db.get(b"a"), None);
-    assert_eq!(db.get(b"missing"), None);
+    assert_eq!(db.get(b"a").unwrap(), None);
+    assert_eq!(db.get(b"missing").unwrap(), None);
 }
 
 #[test]
@@ -28,8 +28,8 @@ fn synced_writes_survive_crash_unsynced_are_lost() {
     disk.crash();
 
     let db = Db::open(disk.clone()).unwrap();
-    assert_eq!(db.get(b"durable"), Some(b"yes".to_vec()));
-    assert_eq!(db.get(b"lost"), None);
+    assert_eq!(db.get(b"durable").unwrap(), Some(b"yes".to_vec()));
+    assert_eq!(db.get(b"lost").unwrap(), None);
 }
 
 #[test]
@@ -45,8 +45,8 @@ fn torn_tail_record_is_discarded() {
     disk.truncate("wal", size - 1);
 
     let db = Db::open(disk.clone()).unwrap();
-    assert_eq!(db.get(b"k1"), Some(b"v1".to_vec()));
-    assert_eq!(db.get(b"k2"), None);
+    assert_eq!(db.get(b"k1").unwrap(), Some(b"v1".to_vec()));
+    assert_eq!(db.get(b"k2").unwrap(), None);
 }
 
 #[test]
@@ -61,6 +61,6 @@ fn corruption_stops_replay_at_the_bad_record() {
     disk.corrupt("wal", 9, 0xff);
 
     let db = Db::open(disk.clone()).unwrap();
-    assert_eq!(db.get(b"k1"), None);
-    assert_eq!(db.get(b"k2"), None);
+    assert_eq!(db.get(b"k1").unwrap(), None);
+    assert_eq!(db.get(b"k2").unwrap(), None);
 }
