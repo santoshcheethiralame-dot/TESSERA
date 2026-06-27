@@ -1,0 +1,13 @@
+[package]
+name = "kv"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+consensus = { path = "../consensus" }
+storage = { path = "../storage" }
+
+[dev-dependencies]
+sim = { path = "../sim" }
+consensus = { path = "../consensus" }
+storage = { path = "../storage" }

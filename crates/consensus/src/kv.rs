@@ -4,6 +4,11 @@ pub trait StateMachine {
     fn apply(&mut self, command: &[u8]) -> Vec<u8>;
 }
 
+pub enum KvCommand {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
 #[derive(Default)]
 pub struct KvStore {
     map: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -21,22 +26,17 @@ impl KvStore {
 
 impl StateMachine for KvStore {
     fn apply(&mut self, command: &[u8]) -> Vec<u8> {
-        match decode(command) {
-            Some(Command::Put(key, value)) => {
+        match decode_command(command) {
+            Some(KvCommand::Put(key, value)) => {
                 self.map.insert(key, value);
             }
-            Some(Command::Delete(key)) => {
+            Some(KvCommand::Delete(key)) => {
                 self.map.remove(&key);
             }
             None => {}
         }
         Vec::new()
     }
-}
-
-enum Command {
-    Put(Vec<u8>, Vec<u8>),
-    Delete(Vec<u8>),
 }
 
 pub fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -52,13 +52,13 @@ pub fn encode_delete(key: &[u8]) -> Vec<u8> {
     buf
 }
 
-fn decode(bytes: &[u8]) -> Option<Command> {
+pub fn decode_command(bytes: &[u8]) -> Option<KvCommand> {
     let tag = *bytes.first()?;
     let mut pos = 1;
     let key = take(bytes, &mut pos)?;
     match tag {
-        1 => Some(Command::Put(key, take(bytes, &mut pos)?)),
-        0 => Some(Command::Delete(key)),
+        1 => Some(KvCommand::Put(key, take(bytes, &mut pos)?)),
+        0 => Some(KvCommand::Delete(key)),
         _ => None,
     }
 }

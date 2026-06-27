@@ -10,6 +10,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv"
+version = "0.1.0"
+dependencies = [
+ "consensus",
+ "sim",
+ "storage",
+]
+
+[[package]]
 name = "sim"
 version = "0.1.0"
 
