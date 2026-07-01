@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use consensus::Raft;
 use kv::LsmKv;
-use server::run_node;
+use server::{run_node, DiskStore};
 use sim::NodeId;
 use storage::{Db, RealDisk};
 
@@ -33,7 +33,8 @@ fn main() {
 
     let disk = RealDisk::open(&data_dir).expect("open data directory");
     let db = Db::open(disk).expect("open database");
-    let raft = Raft::new(id, &cluster, LsmKv::new(db));
+    let store = DiskStore::open(&data_dir).expect("open raft store");
+    let raft = Raft::with_store(id, &cluster, LsmKv::new(db), Box::new(store));
 
     println!("tessera node {id} on {addr}, cluster {cluster:?}, data {data_dir}");
     run_node(id, addr, peers, raft, Arc::new(AtomicBool::new(false)));

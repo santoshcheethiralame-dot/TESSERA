@@ -13,6 +13,9 @@ use consensus::{
 };
 use sim::{Action, Io, NodeId, Process, Rng, Time, TimerId};
 
+mod store;
+pub use store::DiskStore;
+
 type Outbox = Sender<Vec<u8>>;
 type Clients = Arc<Mutex<BTreeMap<NodeId, Outbox>>>;
 type Inbox = Sender<(NodeId, Message)>;
@@ -51,7 +54,12 @@ fn parse_handshake(frame: &[u8]) -> Option<(u8, NodeId)> {
     Some((frame[0], id))
 }
 
-fn peer_writer(self_id: NodeId, addr: SocketAddr, rx: Receiver<Vec<u8>>, shutdown: Arc<AtomicBool>) {
+fn peer_writer(
+    self_id: NodeId,
+    addr: SocketAddr,
+    rx: Receiver<Vec<u8>>,
+    shutdown: Arc<AtomicBool>,
+) {
     'reconnect: while !shutdown.load(Ordering::Relaxed) {
         let mut stream = match TcpStream::connect(addr) {
             Ok(stream) => stream,
@@ -330,14 +338,13 @@ impl Client {
                 continue;
             }
             let mut stream = self.stream.take().unwrap();
-            let probe = Instant::now();
             if write_frame(&mut stream, &msg).is_err() {
-                eprintln!("[client] write to {} failed @{:?}", self.target, probe.elapsed());
                 self.rotate();
                 continue;
             }
-            let reply = read_frame(&mut stream).ok().and_then(|b| decode_message(&b));
-            eprintln!("[client] target={} took {:?} reply={}", self.target, probe.elapsed(), reply.is_some());
+            let reply = read_frame(&mut stream)
+                .ok()
+                .and_then(|b| decode_message(&b));
             match reply {
                 Some(Message::ClientReply {
                     request_id: rid,
