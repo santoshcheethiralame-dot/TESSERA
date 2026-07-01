@@ -1,5 +1,6 @@
 mod kv;
 mod raft;
+mod store;
 mod wire;
 
 pub use kv::{
@@ -7,4 +8,5 @@ pub use kv::{
     KvCommand, KvStore, StateMachine,
 };
 pub use raft::{ClientResult, LogEntry, Message, Raft, Role};
+pub use store::{MemStore, RaftStore};
 pub use wire::{decode_message, encode_message};

@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use sim::{millis, Io, NodeId, Process, Time, TimerId};
 
 use crate::kv::StateMachine;
+use crate::store::{MemStore, RaftStore};
+use crate::wire::{decode_durable, encode_durable};
 
 type Term = u64;
 
@@ -66,6 +68,15 @@ pub struct LogEntry {
     pub request_id: u64,
     pub command: Vec<u8>,
     pub config: Option<Config>,
+}
+
+pub(crate) struct Durable {
+    pub(crate) term: Term,
+    pub(crate) voted_for: Option<NodeId>,
+    pub(crate) log_start: usize,
+    pub(crate) log: Vec<LogEntry>,
+    pub(crate) snapshot: Vec<u8>,
+    pub(crate) snapshot_config: Config,
 }
 
 fn sentinel(term: Term) -> LogEntry {
@@ -213,11 +224,16 @@ pub struct Raft<SM: StateMachine> {
     match_index: BTreeMap<NodeId, usize>,
     sessions: BTreeMap<NodeId, (u64, Vec<u8>)>,
     sm: SM,
+    store: Box<dyn RaftStore>,
 }
 
 impl<SM: StateMachine> Raft<SM> {
     pub fn new(id: NodeId, cluster: &[NodeId], sm: SM) -> Self {
-        Raft {
+        Self::with_store(id, cluster, sm, Box::new(MemStore::new()))
+    }
+
+    pub fn with_store(id: NodeId, cluster: &[NodeId], sm: SM, store: Box<dyn RaftStore>) -> Self {
+        let mut raft = Raft {
             id,
             current_term: 0,
             voted_for: None,
@@ -235,7 +251,64 @@ impl<SM: StateMachine> Raft<SM> {
             match_index: BTreeMap::new(),
             sessions: BTreeMap::new(),
             sm,
+            store,
+        };
+        match raft.store.load() {
+            Some(bytes) => {
+                if let Some(durable) = decode_durable(&bytes) {
+                    raft.load_durable(durable);
+                }
+            }
+            None => raft.persist(),
         }
+        raft
+    }
+
+    fn durable(&self) -> Durable {
+        Durable {
+            term: self.current_term,
+            voted_for: self.voted_for,
+            log_start: self.log.start,
+            log: self.log.entries.clone(),
+            snapshot: self.snapshot.clone(),
+            snapshot_config: self.snapshot_config.clone(),
+        }
+    }
+
+    fn persist(&mut self) {
+        let bytes = encode_durable(&self.durable());
+        self.store.save(&bytes);
+    }
+
+    fn load_durable(&mut self, durable: Durable) {
+        self.current_term = durable.term;
+        self.voted_for = durable.voted_for;
+        self.log = Log {
+            start: durable.log_start,
+            entries: durable.log,
+        };
+        self.snapshot = durable.snapshot;
+        self.snapshot_config = durable.snapshot_config;
+        self.sm.restore(&self.snapshot);
+        self.commit_index = self.log.start;
+        self.last_applied = self.log.start;
+    }
+
+    fn restart(&mut self, io: &mut Io<Message>) {
+        if let Some(bytes) = self.store.load() {
+            if let Some(durable) = decode_durable(&bytes) {
+                self.load_durable(durable);
+            }
+        }
+        self.role = Role::Follower;
+        self.leader_id = None;
+        self.votes.clear();
+        self.lease_until = Time::ZERO;
+        self.heartbeat_acks.clear();
+        self.next_index.clear();
+        self.match_index.clear();
+        self.sessions.clear();
+        self.reset_election_timer(io);
     }
 
     pub fn role(&self) -> Role {
@@ -525,14 +598,12 @@ impl<SM: StateMachine> Raft<SM> {
     }
 }
 
-impl<SM: StateMachine> Process for Raft<SM> {
-    type Message = Message;
-
-    fn on_start(&mut self, io: &mut Io<Message>) {
+impl<SM: StateMachine> Raft<SM> {
+    fn handle_start(&mut self, io: &mut Io<Message>) {
         self.reset_election_timer(io);
     }
 
-    fn on_timer(&mut self, timer: TimerId, io: &mut Io<Message>) {
+    fn handle_timer(&mut self, timer: TimerId, io: &mut Io<Message>) {
         match timer {
             ELECTION_TIMER if self.role != Role::Leader && self.config().contains(self.id) => {
                 self.start_election(io)
@@ -546,7 +617,7 @@ impl<SM: StateMachine> Process for Raft<SM> {
         }
     }
 
-    fn on_message(&mut self, from: NodeId, msg: Message, io: &mut Io<Message>) {
+    fn handle_message(&mut self, from: NodeId, msg: Message, io: &mut Io<Message>) {
         match msg {
             Message::RequestVote {
                 term,
@@ -814,5 +885,27 @@ impl<SM: StateMachine> Process for Raft<SM> {
             }
             Message::ClientReply { .. } => {}
         }
+    }
+}
+
+impl<SM: StateMachine> Process for Raft<SM> {
+    type Message = Message;
+
+    fn on_start(&mut self, io: &mut Io<Message>) {
+        self.handle_start(io);
+    }
+
+    fn on_timer(&mut self, timer: TimerId, io: &mut Io<Message>) {
+        self.handle_timer(timer, io);
+        self.persist();
+    }
+
+    fn on_message(&mut self, from: NodeId, msg: Message, io: &mut Io<Message>) {
+        self.handle_message(from, msg, io);
+        self.persist();
+    }
+
+    fn reboot(&mut self, io: &mut Io<Message>) {
+        self.restart(io);
     }
 }

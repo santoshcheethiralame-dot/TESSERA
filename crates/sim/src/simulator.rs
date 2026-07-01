@@ -70,6 +70,8 @@ pub trait Process {
     fn on_message(&mut self, from: NodeId, msg: Self::Message, io: &mut Io<Self::Message>);
 
     fn on_timer(&mut self, _timer: TimerId, _io: &mut Io<Self::Message>) {}
+
+    fn reboot(&mut self, _io: &mut Io<Self::Message>) {}
 }
 
 enum Wake<M> {
@@ -118,6 +120,7 @@ enum Cb<M> {
     Start,
     Msg(NodeId, M),
     Timer(TimerId),
+    Reboot,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -193,6 +196,11 @@ impl<P: Process> Simulator<P> {
                 msg,
             },
         }));
+    }
+
+    pub fn reboot(&mut self, node: NodeId) {
+        let actions = self.callback(node, Cb::Reboot);
+        self.apply(node, actions);
     }
 
     pub fn now(&self) -> Time {
@@ -288,6 +296,7 @@ impl<P: Process> Simulator<P> {
             Cb::Start => self.processes[node].on_start(&mut io),
             Cb::Msg(from, msg) => self.processes[node].on_message(from, msg, &mut io),
             Cb::Timer(id) => self.processes[node].on_timer(id, &mut io),
+            Cb::Reboot => self.processes[node].reboot(&mut io),
         }
         io.actions
     }

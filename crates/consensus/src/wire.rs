@@ -1,6 +1,6 @@
 use sim::NodeId;
 
-use crate::raft::{ClientResult, Config, LogEntry, Message};
+use crate::raft::{ClientResult, Config, Durable, LogEntry, Message};
 
 pub fn encode_message(msg: &Message) -> Vec<u8> {
     let mut b = Vec::new();
@@ -155,6 +155,48 @@ pub fn decode_message(bytes: &[u8]) -> Option<Message> {
         _ => return None,
     };
     Some(msg)
+}
+
+pub(crate) fn encode_durable(d: &Durable) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_u64(&mut b, d.term);
+    match d.voted_for {
+        Some(node) => {
+            b.push(1);
+            put_usize(&mut b, node);
+        }
+        None => b.push(0),
+    }
+    put_usize(&mut b, d.log_start);
+    put_usize(&mut b, d.log.len());
+    for entry in &d.log {
+        put_entry(&mut b, entry);
+    }
+    put_bytes(&mut b, &d.snapshot);
+    put_config(&mut b, &d.snapshot_config);
+    b
+}
+
+pub(crate) fn decode_durable(bytes: &[u8]) -> Option<Durable> {
+    let mut r = Reader { b: bytes, pos: 0 };
+    let term = r.u64()?;
+    let voted_for = if r.u8()? == 1 { Some(r.usize()?) } else { None };
+    let log_start = r.usize()?;
+    let count = r.usize()?;
+    let mut log = Vec::new();
+    for _ in 0..count {
+        log.push(r.entry()?);
+    }
+    let snapshot = r.bytes()?;
+    let snapshot_config = r.config()?;
+    Some(Durable {
+        term,
+        voted_for,
+        log_start,
+        log,
+        snapshot,
+        snapshot_config,
+    })
 }
 
 fn put_u64(b: &mut Vec<u8>, v: u64) {
