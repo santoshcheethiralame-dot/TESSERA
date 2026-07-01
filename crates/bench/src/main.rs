@@ -150,6 +150,37 @@ fn distributed_bench() {
         n as f64 / dt
     );
 
+    let mut sim = cluster(5, 5);
+    while leader(&sim).is_none() {
+        sim.run_for(millis(1));
+    }
+    let l = leader(&sim).unwrap();
+    let m = 2_000usize;
+    let base = sim.process(l).commit_index();
+    let t0 = sim.now().as_nanos();
+    for i in 0..m {
+        let key = format!("c{i:06}");
+        sim.inject(
+            l,
+            Message::ClientRequest {
+                request_id: i as u64 + 1,
+                command: encode_put(key.as_bytes(), b"v"),
+            },
+        );
+    }
+    let target = base + m;
+    let deadline = sim.now().as_nanos() + 60_000_000_000;
+    while sim.process(l).commit_index() < target && sim.now().as_nanos() < deadline {
+        sim.run_for(millis(1));
+    }
+    let committed = sim.process(l).commit_index() - base;
+    let dt = (sim.now().as_nanos() - t0) as f64 / 1e9;
+    println!(
+        "  {:<26} {committed} writes in {dt:.3} s     ({:>10.0} writes/s, pipelined)",
+        "concurrent throughput",
+        committed as f64 / dt.max(1e-9)
+    );
+
     let mut sim = cluster(5, 2);
     while leader(&sim).is_none() {
         sim.run_for(millis(1));

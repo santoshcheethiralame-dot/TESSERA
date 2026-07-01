@@ -145,7 +145,7 @@ impl Process for Client {
 }
 
 enum Node {
-    Server(Raft<KvStore>),
+    Server(Box<Raft<KvStore>>),
     Client(Client),
 }
 
@@ -185,7 +185,7 @@ fn build(servers: usize, clients: usize, ops_each: usize, seed: u64) -> Simulato
     let server_ids: Vec<usize> = (0..servers).collect();
     let mut nodes: Vec<Node> = server_ids
         .iter()
-        .map(|&id| Node::Server(Raft::new(id, &server_ids, KvStore::new())))
+        .map(|&id| Node::Server(Box::new(Raft::new(id, &server_ids, KvStore::new()))))
         .collect();
     for client in 0..clients {
         let client_seed = seed ^ (0x100 + client as u64);

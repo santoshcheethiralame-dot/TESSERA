@@ -222,6 +222,7 @@ pub struct Raft<SM: StateMachine> {
     last_applied: usize,
     next_index: BTreeMap<NodeId, usize>,
     match_index: BTreeMap<NodeId, usize>,
+    inflight: BTreeSet<NodeId>,
     sessions: BTreeMap<NodeId, (u64, Vec<u8>)>,
     sm: SM,
     store: Box<dyn RaftStore>,
@@ -249,6 +250,7 @@ impl<SM: StateMachine> Raft<SM> {
             last_applied: 0,
             next_index: BTreeMap::new(),
             match_index: BTreeMap::new(),
+            inflight: BTreeSet::new(),
             sessions: BTreeMap::new(),
             sm,
             store,
@@ -406,6 +408,7 @@ impl<SM: StateMachine> Raft<SM> {
         self.voted_for = None;
         self.leader_id = None;
         self.votes.clear();
+        self.inflight.clear();
         self.reset_election_timer(io);
     }
 
@@ -440,6 +443,7 @@ impl<SM: StateMachine> Raft<SM> {
         let next = self.log.last_index() + 1;
         self.next_index.clear();
         self.match_index.clear();
+        self.inflight.clear();
         for peer in self.peers() {
             self.next_index.insert(peer, next);
             self.match_index.insert(peer, 0);
@@ -450,14 +454,23 @@ impl<SM: StateMachine> Raft<SM> {
         self.broadcast_append(io);
     }
 
-    fn broadcast_append(&self, io: &mut Io<Message>) {
+    fn broadcast_append(&mut self, io: &mut Io<Message>) {
         for peer in self.send_targets() {
             self.send_append(peer, io);
         }
         io.set_timer(HEARTBEAT_TIMER, millis(HEARTBEAT_INTERVAL_MS));
     }
 
-    fn send_append(&self, peer: NodeId, io: &mut Io<Message>) {
+    fn replicate_pending(&mut self, io: &mut Io<Message>) {
+        for peer in self.send_targets() {
+            if !self.inflight.contains(&peer) {
+                self.send_append(peer, io);
+            }
+        }
+    }
+
+    fn send_append(&mut self, peer: NodeId, io: &mut Io<Message>) {
+        self.inflight.insert(peer);
         let next = self.next_for(peer);
         if next <= self.log.start {
             io.send(
@@ -758,6 +771,7 @@ impl<SM: StateMachine> Raft<SM> {
                 if self.role != Role::Leader || term != self.current_term {
                     return;
                 }
+                self.inflight.remove(&from);
                 if success {
                     let current = self.match_for(from).max(match_index);
                     self.match_index.insert(from, current);
@@ -766,6 +780,9 @@ impl<SM: StateMachine> Raft<SM> {
                     self.heartbeat_acks.insert(from);
                     if self.has_majority(&self.heartbeat_acks) {
                         self.lease_until = io.now() + millis(LEASE_MS);
+                    }
+                    if self.next_for(from) <= self.log.last_index() {
+                        self.send_append(from, io);
                     }
                 } else {
                     let next = self.next_for(from).saturating_sub(1).max(1);
@@ -824,10 +841,14 @@ impl<SM: StateMachine> Raft<SM> {
                 if self.role != Role::Leader || term != self.current_term {
                     return;
                 }
+                self.inflight.remove(&from);
                 let current = self.match_for(from).max(match_index);
                 self.match_index.insert(from, current);
                 self.next_index.insert(from, current + 1);
                 self.maybe_commit(io);
+                if self.next_for(from) <= self.log.last_index() {
+                    self.send_append(from, io);
+                }
             }
             Message::ClientRequest {
                 request_id,
@@ -858,7 +879,7 @@ impl<SM: StateMachine> Raft<SM> {
                         command,
                         config: None,
                     });
-                    self.broadcast_append(io);
+                    self.replicate_pending(io);
                     self.maybe_commit(io);
                 }
             }

@@ -2,10 +2,11 @@
 
 Reproduce: `cargo run --release -p bench`.
 
-Two regimes, measured honestly:
+Three regimes, measured honestly:
 
 - **Storage engine** — real numbers on **real disk with real `fsync`** (`RealDisk`, the production implementation of the `Disk` trait).
-- **Distributed Raft** — measured in the **deterministic simulator** in virtual time. The consensus code is real; the network and clock are simulated (1–10 ms one-way latency). These isolate algorithmic behavior (election, recovery, availability), not physical hardware limits.
+- **Distributed Raft (simulator)** — measured in the **deterministic simulator** in virtual time. The consensus code is real; the network and clock are simulated (1–10 ms one-way latency). These isolate algorithmic behavior (election, recovery, availability), not physical hardware limits.
+- **Distributed Raft (real TCP)** — the **same Raft and LSM code**, driven by the production runtime (`server` crate): real threads, real sockets, real OS timers, a 5-node cluster on localhost with a TCP client. This is the "same state machine, two worlds" claim made literal — the simulator and the network share one unchanged state machine.
 
 Environment: developer laptop, Windows 11, x86_64, Rust 1.96 release. Numbers vary run-to-run; these are representative.
 
@@ -28,16 +29,31 @@ From-scratch LSM — WAL + fsync, memtable, block SSTables + bloom filters, size
 | Metric | Value |
 |--------|------|
 | Leader election | ~214 ms |
-| Recovery after leader kill | ~194 ms |
+| Recovery after leader kill | ~200 ms |
 | 3\|2 partition | majority stays available; minority cannot elect (no split-brain) |
-| Replicated write, serial commit | ~10 ms/op (~96 ops/s) |
+| Replicated write, serial commit | ~10 ms/op (~99 ops/s) |
+| Replicated write, concurrent (pipelined) | ~83,000 ops/s |
 
-- **Election / recovery** are bounded by the randomized election timeout (150–300 ms). Recovery after killing the leader (~194 ms) is one timeout plus a vote+append round — exactly as expected.
+- **Election / recovery** are bounded by the randomized election timeout (150–300 ms). Recovery after killing the leader (~200 ms) is one timeout plus a vote+append round — exactly as expected.
 - **Partition**: the majority side keeps committing; the minority spins as candidates and never elects. The safety property, measured.
-- **Serial replicated-write latency** ≈ one network round-trip (the sim is configured at 1–10 ms one-way, so ~10 ms RTT). The ~96 ops/s figure is **serial** — one commit at a time — and therefore latency-bound, not peak throughput. Pipelining in-flight requests and batching log entries (standard, not yet implemented here) would multiply it.
+- **Serial vs concurrent is the whole story.** The ~99 ops/s figure is one commit at a time — pure latency (~10 ms RTT), not a throughput ceiling. Fire 2,000 writes at the leader at once and they commit in ~24 ms (~83k ops/s) — an ~840× jump — because the leader **pipelines**: a burst coalesces behind a single in-flight `AppendEntries` per follower, the next batch ships the instant an ack lands, and one RPC carries many entries. This is the standard Raft flow-control (one outstanding append per peer + batching), and it's why the serial number is the wrong one to quote for throughput.
+
+## Distributed Raft over real TCP (5 nodes, localhost, real sockets)
+
+The `server` crate runs the unchanged `Raft<LsmKv<RealDisk>>` under a real driver — an acceptor thread, per-connection reader threads, per-peer writer threads, and an event loop with real OS timers — speaking a hand-rolled length-prefixed wire codec. A blocking TCP client (`Client`) routes to the leader, follows `NotLeader` redirects, and retries. Five nodes on localhost, 100-byte values, one in-flight request at a time.
+
+| Workload | p50 | p99 | Throughput |
+|----------|----:|----:|-----------:|
+| Replicated put (commit through Raft) | 189 µs | ~1.0 ms | ~4,600 writes/s |
+| Linearizable get (leader lease read) | 44 µs | 147 µs | ~18,600 ops/s |
+| Recovery after leader kill (client-observed) | — | — | ~2.1 s |
+
+- **The same state machine is ~50× faster over localhost TCP than in the simulator** (~4,600 vs ~96 writes/s serial) — because localhost RTT is tens of microseconds, not the 1–10 ms the simulator deliberately models. This is the point of the architecture: one code path, and the driver decides the physics.
+- **Lease reads are local** to the leader (no replication round-trip), so reads (~44 µs p50) run several times faster than writes.
+- **Recovery is reported as the client sees it.** The protocol re-elects in ~194 ms (measured in the simulator); the ~2.1 s here is the *client's* failover policy — the simple round-robin `Client` retries against a now-stale leader hint and waits on read timeouts before rotating. It measures client behavior, not Raft latency. A smarter client (parallel probing, shorter adaptive timeouts) would close most of the gap.
 
 ## Honest scope — what isn't here yet
 
-- **Real networked deployment + etcd comparison.** The distributed numbers come from the simulator. The architecture is built for it (the state machines are driver-agnostic — same code, two worlds), so a production TCP transport driver would let this same Raft run across real nodes/containers for a head-to-head against etcd. That transport plus a multi-node/container harness is the remaining step.
+- **Multi-machine / container deployment + etcd comparison.** The TCP transport above is real, but run on one host (localhost, 5 processes-as-threads). The `tessera-server` binary takes node id, listen address, peers, and a data dir, so the same code runs across real machines or containers; a multi-host harness and an etcd head-to-head are the remaining step.
 - **vs single-node RocksDB.** A direct comparison needs RocksDB available; the figures above are the from-scratch engine standalone.
-- **Pipelined/batched replication throughput**, which would lift the distributed write number well above the serial figure.
+- **Batching commands into a single log entry.** Replication already pipelines (one in-flight append per peer, many entries per RPC); packing multiple client commands into one *entry* would shave a little more per-entry overhead under extreme load, but the round-trip cost is already amortized.
