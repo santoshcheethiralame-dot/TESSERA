@@ -7,6 +7,10 @@ edition.workspace = true
 name = "tessera-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "tessera-ui"
+path = "src/ui.rs"
+
 [dependencies]
 consensus = { path = "../consensus" }
 storage = { path = "../storage" }

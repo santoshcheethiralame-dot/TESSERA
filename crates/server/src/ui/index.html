@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tessera — raft console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <main class="page">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand__mark">tessera<span class="caret"></span></span>
+          <span class="brand__desc">distributed key/value store · raft consensus · lsm storage</span>
+        </div>
+        <div class="health">
+          <span class="health__dot" id="health-dot"></span>
+          <span class="health__text" id="health-text">believed leader · <b id="leader-chip">—</b></span>
+        </div>
+      </header>
+
+      <section class="sec">
+        <div class="sec__head">
+          <span class="sec__idx">01</span>
+          <h2 class="sec__title">cluster</h2>
+          <span class="sec__meta" id="node-count">3 nodes</span>
+        </div>
+        <div class="topology" id="topology"></div>
+        <div class="nodes-field">
+          <label for="nodes">nodes</label>
+          <input id="nodes" type="text" spellcheck="false" autocomplete="off"
+            value="127.0.0.1:7001, 127.0.0.1:7002, 127.0.0.1:7003" />
+          <button class="ghost" id="reset-nodes" type="button">reset</button>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec__head">
+          <span class="sec__idx">02</span>
+          <h2 class="sec__title">operation</h2>
+          <span class="sec__meta" id="mode-label">put</span>
+        </div>
+        <div class="seg" role="tablist" aria-label="operation">
+          <button class="seg__btn is-active" data-op="put" type="button">put</button>
+          <button class="seg__btn" data-op="get" type="button">get</button>
+          <button class="seg__btn" data-op="delete" type="button">delete</button>
+          <span class="seg__slide" id="seg-slide"></span>
+        </div>
+        <form id="form" class="form">
+          <div class="io" id="io">
+            <label class="field">
+              <span>key</span>
+              <input id="key" autocomplete="off" spellcheck="false" placeholder="account:42" required list="recent-keys" />
+              <datalist id="recent-keys"></datalist>
+            </label>
+            <label class="field" id="value-field">
+              <span>value</span>
+              <input id="value" autocomplete="off" spellcheck="false" placeholder="active" />
+            </label>
+          </div>
+          <button class="run" id="execute" type="submit">
+            <span id="execute-label">commit put</span>
+            <span class="run__key" aria-hidden="true">↵</span>
+          </button>
+        </form>
+        <p class="keyhint">⌘/ctrl + ↵ execute · 1 · 2 · 3 switch op · / focus key</p>
+      </section>
+
+      <section class="sec">
+        <div class="sec__head">
+          <span class="sec__idx">03</span>
+          <h2 class="sec__title">result</h2>
+          <span class="sec__meta"><span class="status" id="status">idle</span></span>
+        </div>
+        <div class="result">
+          <div class="result__value">
+            <span class="k">value</span>
+            <pre id="result-value">awaiting an operation</pre>
+          </div>
+          <div class="result__metrics">
+            <div class="metric metric--lat">
+              <span class="k">latency</span>
+              <span class="metric__num"><span id="latency">—</span><i>ms</i></span>
+              <svg class="spark" id="spark" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true"></svg>
+            </div>
+            <div class="metric">
+              <span class="k">leader</span>
+              <span class="metric__num" id="leader-result">—</span>
+            </div>
+            <div class="metric">
+              <span class="k">ops</span>
+              <span class="metric__num" id="op-count">0</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sec">
+        <div class="sec__head">
+          <span class="sec__idx">04</span>
+          <h2 class="sec__title">log</h2>
+          <button class="ghost" id="clear-log" type="button">clear</button>
+        </div>
+        <ol class="log" id="log">
+          <li class="log__empty">no operations yet</li>
+        </ol>
+      </section>
+
+      <footer class="foot">
+        <span>same state machine as the simulator</span>
+        <span>hand-rolled http · wire codec · rust</span>
+      </footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
