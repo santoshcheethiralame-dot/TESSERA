@@ -308,9 +308,10 @@ $("#reset-nodes").addEventListener("click", () => {
   renderTopology();
 });
 $("#clear-log").addEventListener("click", () => {
-  log.innerHTML = '<li class="log__empty">no operations yet</li>';
+  log.innerHTML = '<li class="log__empty">— no operations yet —</li>';
 });
 nodesInput.addEventListener("input", renderTopology);
+nodesInput.addEventListener("change", probe);
 form.addEventListener("submit", run);
 
 document.addEventListener("keydown", (e) => {
@@ -329,5 +330,30 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+let probing = false;
+async function probe() {
+  const nodes = nodeList();
+  if (probing || nodes.length === 0) return;
+  probing = true;
+  const body = new URLSearchParams();
+  body.set("nodes", nodes.join(","));
+  body.set("key", "__tessera_probe__");
+  try {
+    const data = await callApi("get", body);
+    if (data && data.ok) {
+      topology.classList.remove("is-offline");
+      if (typeof data.leader === "number") setLeader(data.leader);
+    }
+  } catch (_) {
+    healthDot.classList.remove("is-live");
+    healthDot.classList.add("is-offline");
+    topology.classList.add("is-offline");
+  } finally {
+    probing = false;
+  }
+}
+
 setOp("put");
 renderTopology();
+probe();
+setInterval(probe, 3500);
