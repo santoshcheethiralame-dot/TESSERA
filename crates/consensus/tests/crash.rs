@@ -240,7 +240,10 @@ fn linearizable_across_crash_restarts() {
         sim.run_for(secs(60));
         let h = history(&sim, 5, 3);
         assert!(!h.is_empty(), "no ops completed at seed {seed}");
-        assert!(linearizable(&h), "non-linearizable across crashes at seed {seed}");
+        assert!(
+            linearizable(&h),
+            "non-linearizable across crashes at seed {seed}"
+        );
     }
 }
 

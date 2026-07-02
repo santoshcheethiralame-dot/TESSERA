@@ -34,7 +34,10 @@ fn raft_state_survives_process_restart() {
         while sim.process(0).commit_index() <= before && sim.now() < deadline {
             sim.run_for(millis(1));
         }
-        assert!(sim.process(0).commit_index() > before, "write did not commit");
+        assert!(
+            sim.process(0).commit_index() > before,
+            "write did not commit"
+        );
     }
 
     {
