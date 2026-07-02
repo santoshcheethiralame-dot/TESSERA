@@ -1,12 +1,14 @@
 # tessera
 
+[![ci](https://github.com/santoshcheethiralame-dot/TESSERA/actions/workflows/ci.yml/badge.svg)](https://github.com/santoshcheethiralame-dot/TESSERA/actions/workflows/ci.yml)
+
 A distributed, sharded, replicated key-value store on a from-scratch storage engine. Pure Rust, standard library only — no external crates anywhere in the workspace.
 
 Storage is an LSM-tree: memtable, SSTables, write-ahead log, size-tiered compaction, MVCC. Raft replicates each shard, with its term, vote, and log durable on disk. The keyspace is split across many Raft groups behind a coordinator, with a routing client on top. The CockroachDB/TiKV shape, scaled down.
 
 ## More than a coursework Raft KV
 
-**Deterministic simulation testing.** Time, network, disk, scheduling, and randomness are all injectable. The whole cluster runs single-threaded inside a seeded world, so failure interleavings — partitions, message loss and duplication, reordering, node crashes — can be fuzzed by the thousand and any bug replays exactly from its seed. The way TigerBeetle and FoundationDB find the bugs that matter, built in from the start. It has already caught a real one: a split-brain that only surfaced on a specific seed, where a duplicated vote reply let a candidate win a sub-majority and two leaders emerged in one term.
+**Deterministic simulation testing.** Time, network, disk, scheduling, and randomness are all injectable. The whole cluster runs single-threaded inside a seeded world, so failure interleavings — partitions, message loss and duplication, reordering, node crashes — can be fuzzed by the thousand and any bug replays exactly from its seed. The way TigerBeetle and FoundationDB find the bugs that matter, built in from the start. It has already caught a real one: a split-brain that only surfaced on a specific seed, where a duplicated vote reply let a candidate win a sub-majority and two leaders emerged in one term. The full story: [Seed 99 — anatomy of a split brain](docs/seed-99.md).
 
 **Linearizability checking.** A Wing–Gong checker validates client histories under all of the above — 1,000 randomized failure schedules, zero violations.
 
@@ -48,6 +50,10 @@ cargo run -p server --bin tessera-server -- 2 127.0.0.1:7003 ./data/n2 0=127.0.0
 cargo run -p server --bin tessera-ui -- 127.0.0.1:8080    # console at http://127.0.0.1:8080
 ```
 
+![The console: a live three-node cluster with the elected leader highlighted](docs/console.png)
+
+The console shows the live topology — the leader lights up, and it follows a failover on its own: kill the leader's process and the highlight moves to the newly elected node a few seconds later, while the killed node recovers its Raft state from disk and rejoins.
+
 ## Build & run
 
 ```
@@ -57,3 +63,14 @@ cargo test -p consensus --test crash                 # crash-restart safety unde
 cargo test -p server --test networked                # 3-node cluster over real TCP: elect, replicate, kill, recover
 cargo run --release -p bench                          # benchmarks (see BENCHMARKS.md)
 ```
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — the crate map, the state-machine/driver split, and the life of a write
+- [Deterministic simulation](docs/simulation.md) — how the seeded world works and what the harnesses check
+- [Seed 99](docs/seed-99.md) — the split-brain bug the fuzz caught, from alarm to fix
+- [Benchmarks](BENCHMARKS.md) — real numbers on real disk, in the simulator, and over TCP
+
+## License
+
+MIT — see [LICENSE](LICENSE).
