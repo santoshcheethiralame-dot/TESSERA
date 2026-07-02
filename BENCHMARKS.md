@@ -40,16 +40,17 @@ From-scratch LSM — WAL + fsync, memtable, block SSTables + bloom filters, size
 
 ## Distributed Raft over real TCP (5 nodes, localhost, real sockets)
 
-The `server` crate runs the unchanged `Raft<LsmKv<RealDisk>>` under a real driver — an acceptor thread, per-connection reader threads, per-peer writer threads, and an event loop with real OS timers — speaking a hand-rolled length-prefixed wire codec. A blocking TCP client (`Client`) routes to the leader, follows `NotLeader` redirects, and retries. Five nodes on localhost, 100-byte values, one in-flight request at a time.
+The `server` crate runs the unchanged `Raft<LsmKv<RealDisk>>` under a real driver — an acceptor thread, per-connection reader threads, per-peer writer threads, and an event loop with real OS timers — speaking a hand-rolled length-prefixed wire codec, with Raft state fsync'd to disk before each reply. A blocking TCP client (`Client`) routes to the leader, follows `NotLeader` redirects, and retries. Five nodes on localhost, 100-byte values, one in-flight request at a time.
 
 | Workload | p50 | p99 | Throughput |
 |----------|----:|----:|-----------:|
-| Replicated put (commit through Raft) | 189 µs | ~1.0 ms | ~4,600 writes/s |
-| Linearizable get (leader lease read) | 44 µs | 147 µs | ~18,600 ops/s |
+| Replicated put (commit through Raft, fsync-durable) | ~445 µs | ~2 ms | ~1,750 writes/s |
+| Linearizable get (leader lease read) | ~80 µs | ~390 µs | ~9,700 ops/s |
 | Recovery after leader kill (client-observed) | — | — | ~2.1 s |
 
-- **The same state machine is ~50× faster over localhost TCP than in the simulator** (~4,600 vs ~96 writes/s serial) — because localhost RTT is tens of microseconds, not the 1–10 ms the simulator deliberately models. This is the point of the architecture: one code path, and the driver decides the physics.
-- **Lease reads are local** to the leader (no replication round-trip), so reads (~44 µs p50) run several times faster than writes.
+- **Durable writes are fsync-bound.** Each write persists the Raft log to disk before it's acknowledged, so serial write latency (~445 µs p50) is dominated by one `fsync` — the same durability barrier the storage table shows, now on the replicated path. That's the honest cost of not losing acknowledged writes; concurrency hides it (see the pipelined ~83k/s in the simulator), and dropping fsync would trade safety for speed.
+- **Serial over localhost is still ~18× the simulator's serial number** (~1,750 vs ~99 writes/s) — the sim deliberately models 1–10 ms RTT while localhost is microseconds. Same code path, and the driver decides the physics.
+- **Lease reads are local** to the leader (no replication round-trip, no fsync), so reads (~80 µs p50) run several times faster than writes.
 - **Recovery is reported as the client sees it.** The protocol re-elects in ~194 ms (measured in the simulator); the ~2.1 s here is the *client's* failover policy — the simple round-robin `Client` retries against a now-stale leader hint and waits on read timeouts before rotating. It measures client behavior, not Raft latency. A smarter client (parallel probing, shorter adaptive timeouts) would close most of the gap.
 
 ## Honest scope — what isn't here yet
